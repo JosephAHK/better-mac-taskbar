@@ -1,0 +1,21 @@
+# macOS / Xcode
+.DS_Store
+*.swp
+*~
+xcuserdata/
+DerivedData/
+
+# Build output & local signing identity (never commit certs)
+build/
+*.p12
+*.pem
+*.cer
+*.key
+
+# Cursor agent debug dumps (may contain window titles from your machine)
+.cursor/debug*.log
+.cursor/*.log
+
+# Local logs
+*.log
+!README.md

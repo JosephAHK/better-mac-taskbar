@@ -1,0 +1,42 @@
+---
+description: Where Better Mac Taskbar app logs live and how to use them when diagnosing stops/crashes
+alwaysApply: true
+---
+
+# App logs
+
+When the taskbar disappears, won't start, or "stopped", **read the app log first** before guessing.
+
+## Location
+
+- **Primary:** `~/Library/Logs/BetterMacTaskbar/app.log`
+- **Rotated backup (when primary exceeds ~2MB):** `~/Library/Logs/BetterMacTaskbar/app.1.log`
+
+```bash
+tail -n 80 ~/Library/Logs/BetterMacTaskbar/app.log
+pgrep -fl BetterMacTaskbar
+```
+
+## What to look for
+
+| Line | Meaning |
+|------|---------|
+| `bootstrap` / `application ready` | App launched successfully |
+| `heartbeat` (every ~60s) | Process was still alive |
+| `caughtSignal signal=SIGTERM` | Killed by `pkill` / quit signal (rebuild scripts do this) |
+| `shutdown` / `applicationWillTerminate` | Clean quit (Start menu / status menu Quit) |
+| `uncaughtException` | Swift/ObjC exception crash |
+| Last heartbeat, then silence | Died via SIGKILL, forced quit, or crash with no handler |
+
+Also check whether the process is running: `pgrep -x BetterMacTaskbar`.
+
+## Logging API
+
+Use `AppLog` (`Sources/Services/AppLog.swift`):
+
+```swift
+AppLog.info("something happened", ["key": value])
+AppLog.error("failed", ["error": message])
+```
+
+Do **not** write debug/agent logs under `.cursor/debug-*.log` for production diagnosis — use `AppLog`.
