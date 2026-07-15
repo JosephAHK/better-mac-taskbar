@@ -1,5 +1,7 @@
 # Better Mac Taskbar
 
+![Better Mac Taskbar](docs/taskbar-hero.png)
+
 A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (menu bar + bottom bar, no Dock required).
 
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5-orange)
