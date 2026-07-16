@@ -11,7 +11,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Frosted-glass bottom taskbar
 - Per-window icons (Chrome / multi-window apps show separately)
 - Center or left-aligned icons
-- Start menu with pinned apps and type-to-search across installed apps
+- Start menu with pinned apps and type-to-search across installed apps (configurable Start hotkey; default Windows / ⌘ alone unhides the taskbar)
 - Clock, tray, Show Desktop
 - Right-click: Close, Minimize, Pin, Hide, New window, Quit
 - Middle-click closes a window
@@ -54,6 +54,7 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Center taskbar icons
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar
+- Start menu hotkey (click to record; Reset restores ⌘ / Windows key)
 - Launch at login
 
 ## Project layout

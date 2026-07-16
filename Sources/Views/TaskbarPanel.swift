@@ -51,10 +51,11 @@ final class TaskbarPanelController {
     }
 
     /// Keep the bar visible while overlays (Start, Downloads) are open.
+    /// Reveals immediately (no slide-in) so Start anchors at the correct position.
     func beginKeepVisible() {
         keepVisibleCount += 1
         cancelHideTimer()
-        revealAll(animated: true)
+        revealAll(animated: false)
     }
 
     func endKeepVisible() {
@@ -62,6 +63,27 @@ final class TaskbarPanelController {
         if keepVisibleCount == 0 {
             handleMouseLocation(NSEvent.mouseLocation)
         }
+    }
+
+    /// Windows-style Start key: snap the taskbar visible and toggle Start on the screen under the cursor.
+    func toggleStartMenu() {
+        let point = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+        let targetID = screen.map { ObjectIdentifier($0) }
+        let target = targetID.flatMap { contentViews[$0] } ?? contentViews.values.first
+
+        for (id, content) in contentViews {
+            if id != targetID, content.isStartMenuVisible {
+                content.hideStartMenu()
+            }
+        }
+
+        let opening = target.map { !$0.isStartMenuVisible } ?? true
+        if opening {
+            cancelHideTimer()
+            revealAll(animated: false)
+        }
+        target?.toggleStartMenuFromHotkey()
     }
 
     @objc private func screensChanged() {

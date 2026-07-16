@@ -36,6 +36,10 @@ swiftc \
   -framework ApplicationServices \
   -framework CoreGraphics \
   -framework ServiceManagement \
+  -framework CoreAudio \
+  -framework AudioToolbox \
+  -framework CoreWLAN \
+  -framework CoreLocation \
   -O \
   "${SOURCES[@]}" \
   -o "$MACOS_DIR/$EXEC_NAME"
@@ -51,6 +55,10 @@ if [[ ! -x "$MACOS_DIR/$EXEC_NAME" ]]; then
     -framework ApplicationServices \
     -framework CoreGraphics \
     -framework ServiceManagement \
+    -framework CoreAudio \
+    -framework AudioToolbox \
+    -framework CoreWLAN \
+    -framework CoreLocation \
     -O \
     "${SOURCES[@]}" \
     -o "$MACOS_DIR/$EXEC_NAME"

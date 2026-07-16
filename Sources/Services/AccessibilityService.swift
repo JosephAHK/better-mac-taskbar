@@ -18,17 +18,16 @@ enum AccessibilityService {
     }
 
     static func isStandardWindow(_ element: AXUIElement) -> Bool {
-        if let subrole = stringValue(element, kAXSubroleAttribute as CFString) {
+        if let subrole = stringValue(element, kAXSubroleAttribute as CFString),
+           !subrole.isEmpty {
             let allowed: Set<String> = [
                 kAXStandardWindowSubrole as String,
-                kAXDialogSubrole as String,
-                ""
+                kAXDialogSubrole as String
             ]
-            if !subrole.isEmpty && !allowed.contains(subrole) {
-                // Still allow untitled standard windows without subrole quirks
-                if subrole.contains("floating") || subrole.contains("system") {
-                    return false
-                }
+            // Reject AXUnknown / floating / system panels. Calendar’s side inspector is
+            // AXUnknown (~300pt) and used to appear as a second identical taskbar icon.
+            if !allowed.contains(subrole) {
+                return false
             }
         }
         // Minimized windows sometimes report Dock-sized frames — never drop them.

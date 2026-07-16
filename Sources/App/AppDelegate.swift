@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         WindowManager.shared.start()
         TaskbarPanelController.shared.show()
+        StartHotkeyMonitor.shared.start()
 
         ensureAccessibility()
 
@@ -38,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.info("applicationWillTerminate")
+        StartHotkeyMonitor.shared.stop()
         WindowManager.shared.stop()
         TaskbarPanelController.shared.hide()
         if TaskbarSettings.shared.replaceDock {

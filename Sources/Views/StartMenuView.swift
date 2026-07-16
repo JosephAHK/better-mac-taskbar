@@ -112,6 +112,16 @@ final class StartMenuController {
     }
 
     private func show(relativeTo view: NSView) {
+        VolumePanelController.shared.hide()
+        WiFiPanelController.shared.hide()
+        DownloadsPanelController.shared.hide()
+        // Unhide before measuring the Start button so the menu anchors on-screen
+        // when the taskbar was auto-hidden (e.g. Start key).
+        if !panelWasVisible {
+            panelWasVisible = true
+            TaskbarPanelController.shared.beginKeepVisible()
+        }
+
         let width: CGFloat = 360
         let height: CGFloat = 420
         let content = StartMenuView(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -147,7 +157,13 @@ final class StartMenuController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = content
 
-        guard let window = view.window else { return }
+        guard let window = view.window else {
+            if panelWasVisible {
+                TaskbarPanelController.shared.endKeepVisible()
+                panelWasVisible = false
+            }
+            return
+        }
         let screenFrame = window.convertToScreen(view.convert(view.bounds, to: nil))
         let x = screenFrame.minX
         let y = screenFrame.maxY
@@ -160,10 +176,6 @@ final class StartMenuController {
         self.panel = panel
         self.anchor = view
         installMonitors()
-        if !panelWasVisible {
-            panelWasVisible = true
-            TaskbarPanelController.shared.beginKeepVisible()
-        }
     }
 
     private func installMonitors() {

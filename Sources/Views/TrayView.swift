@@ -5,12 +5,15 @@ final class TrayView: NSView {
     var onOpenSettings: (() -> Void)?
 
     private let downloadsButton = DownloadsButtonView()
+    private let wifiButton = NSButton()
+    private let volumeButton = NSButton()
     private let clockButton = NSButton()
     private let timeLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
     private let showDesktop = ShowDesktopButtonView()
     private let actionCenter = NSButton()
     private var clockTimer: Timer?
+    private var volumeIconTimer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -28,6 +31,7 @@ final class TrayView: NSView {
 
     deinit {
         clockTimer?.invalidate()
+        volumeIconTimer?.invalidate()
     }
 
     private func setup() {
@@ -47,12 +51,21 @@ final class TrayView: NSView {
         let downloadsDivider = makeDivider()
 
         let chevron = makeTrayIconButton(systemName: "chevron.up", toolTip: "Hidden icons")
-        let wifi = makeTrayIconButton(systemName: "wifi", toolTip: "Network")
-        wifi.target = self
-        wifi.action = #selector(openNetwork)
-        let volume = makeTrayIconButton(systemName: "speaker.wave.2.fill", toolTip: "Sound")
-        volume.target = self
-        volume.action = #selector(openSound)
+
+        configureTrayIconButton(wifiButton, systemName: "wifi", toolTip: "Network")
+        wifiButton.target = self
+        wifiButton.action = #selector(toggleWiFiMenu)
+
+        configureTrayIconButton(volumeButton, systemName: VolumeService.speakerSymbolName(), toolTip: "Volume")
+        volumeButton.target = self
+        volumeButton.action = #selector(toggleVolumeSlider)
+
+        volumeIconTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshVolumeIcon()
+        }
+        if let volumeIconTimer {
+            RunLoop.main.add(volumeIconTimer, forMode: .common)
+        }
 
         timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         timeLabel.textColor = .labelColor
@@ -101,8 +114,8 @@ final class TrayView: NSView {
         stack.addArrangedSubview(downloadsButton)
         stack.addArrangedSubview(downloadsDivider)
         stack.addArrangedSubview(chevron)
-        stack.addArrangedSubview(wifi)
-        stack.addArrangedSubview(volume)
+        stack.addArrangedSubview(wifiButton)
+        stack.addArrangedSubview(volumeButton)
         stack.addArrangedSubview(clockButton)
         stack.addArrangedSubview(actionCenter)
         stack.addArrangedSubview(desktopDivider)
@@ -143,13 +156,22 @@ final class TrayView: NSView {
 
     private func makeTrayIconButton(systemName: String, toolTip: String) -> NSButton {
         let button = NSButton()
+        configureTrayIconButton(button, systemName: systemName, toolTip: toolTip)
+        return button
+    }
+
+    private func configureTrayIconButton(_ button: NSButton, systemName: String, toolTip: String) {
         button.image = NSImage(systemSymbolName: systemName, accessibilityDescription: toolTip)
         button.bezelStyle = .inline
         button.isBordered = false
         button.toolTip = toolTip
         button.translatesAutoresizingMaskIntoConstraints = false
         button.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        return button
+    }
+
+    private func refreshVolumeIcon() {
+        let name = VolumeService.speakerSymbolName()
+        volumeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: "Volume")
     }
 
     private func tick() {
@@ -164,16 +186,14 @@ final class TrayView: NSView {
 
     @objc private func openSettings() { onOpenSettings?() }
 
-    @objc private func openNetwork() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension") {
-            NSWorkspace.shared.open(url)
-        }
+    @objc private func toggleWiFiMenu() {
+        VolumePanelController.shared.hide()
+        WiFiPanelController.shared.toggle(relativeTo: wifiButton)
     }
 
-    @objc private func openSound() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") {
-            NSWorkspace.shared.open(url)
-        }
+    @objc private func toggleVolumeSlider() {
+        WiFiPanelController.shared.hide()
+        VolumePanelController.shared.toggle(relativeTo: volumeButton)
     }
 
     @objc private func openDateTime() {

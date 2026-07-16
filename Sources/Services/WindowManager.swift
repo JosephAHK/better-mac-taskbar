@@ -16,6 +16,9 @@ final class WindowManager {
     private var lastActivatedAt: Date?
     /// Brief window where taskbar click wins over still-stale front-window probes.
     private let activationGrace: TimeInterval = 1.2
+    /// Skip in-process AppleScript title polls after a click — NSAppleScript activates
+    /// this accessory app and flashes focus back to the previous window.
+    private var suppressScriptedTitlesUntil: Date?
     private var scriptedTitleCache: [String: (titles: [String], at: Date)] = [:]
     /// Keep AppleScript cache short so new Chrome windows appear quickly without AX.
     private let scriptedTitleCacheTTL: TimeInterval = 0.35
@@ -23,6 +26,18 @@ final class WindowManager {
     private let pollInterval: TimeInterval = 0.35
 
     private init() {}
+
+    private var shouldSuppressScriptedTitles: Bool {
+        guard let until = suppressScriptedTitlesUntil else { return false }
+        return Date() < until
+    }
+
+    /// If in-process AppleScript left *us* frontmost, push focus back to the target.
+    private func reclaimFrontIfStolen(for info: WindowInfo) {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == selfPID else { return }
+        AccessibilityService.forceShowApp(pid: info.pid, bundleID: info.bundleID)
+    }
 
     func noteActivated(id: String) {
         lastActivatedWindowID = id
@@ -78,13 +93,17 @@ final class WindowManager {
     /// window title (CG z-order indices do not track Chrome's real front window).
     func activateWindow(_ info: WindowInfo) {
         noteActivated(id: info.id)
+        // Block Chrome title AppleScript during grace — it activates this app and flashes.
+        suppressScriptedTitlesUntil = Date().addingTimeInterval(activationGrace + 0.4)
 
         // Raise off the main thread so the blue underline can paint immediately.
         let payload = info
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             self?.raiseWindow(payload)
+            self?.reclaimFrontIfStolen(for: payload)
             DispatchQueue.main.async {
                 self?.refresh()
+                self?.reclaimFrontIfStolen(for: payload)
             }
         }
     }
@@ -204,8 +223,36 @@ final class WindowManager {
         }
     }
 
+    /// Same Launch Services path as right-click → New window. More reliable than
+    /// `NSRunningApplication.activate` for Electron / Chromium (menu bar updates,
+    /// window stays behind).
+    private static let launchServicesForegroundBundles: Set<String> = [
+        "com.google.Chrome",
+        "com.google.Chrome.beta",
+        "com.google.Chrome.canary",
+        "com.apple.Safari",
+        "company.thebrowser.Browser",
+        "com.brave.Browser",
+        "org.mozilla.firefox",
+        "com.spotify.client",
+        "com.tinyspeck.slackmacgap",
+        "com.anthropic.claudefordesktop",
+        "com.microsoft.VSCode",
+        "com.todesktop.230313mzl4w4u92"
+    ]
+
+    private func ensureFrontmostViaLaunchServices(bundleID: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
+    }
+
     private func raiseWindow(_ info: WindowInfo) {
-        // One raise path only — stacking AXRaise / activate makes windows crawl forward.
+        // AX first so the clicked window (not a sibling) is deminimized / made main.
+        // Then Launch Services when needed — bare activate often only flips the menu bar.
         let app = NSRunningApplication(processIdentifier: info.pid)
         let wasHidden = app?.isHidden ?? false
         app?.unhide()
@@ -215,49 +262,44 @@ final class WindowManager {
 
         if let ax = liveMatch {
             AccessibilityService.raise(ax, pid: info.pid)
+        } else {
+            // Hidden apps (Spotify Cmd+H) often still report a CG frame with isMinimized=false
+            // and an empty title — still need scripted deminiaturize / reopen, not bare activate.
+            // Do NOT AppleScript-activate visible Electron apps — NSAppleScript runs in-process
+            // and makes Better Mac Taskbar frontmost (focus flash). Use forceShowApp below.
+            let needsRestore = wasHidden || info.isMinimized || !info.title.isEmpty
+            if needsRestore {
+                _ = AccessibilityService.raiseScriptedWindow(
+                    bundleID: info.bundleID,
+                    appName: info.appName,
+                    title: info.title,
+                    pid: info.pid
+                )
+            }
+        }
+
+        guard let bundleID = info.bundleID else {
+            AccessibilityService.forceShowApp(pid: info.pid, bundleID: nil)
             return
         }
 
-        // Hidden apps (Spotify Cmd+H) often still report a CG frame with isMinimized=false
-        // and an empty title — still need scripted deminiaturize / reopen, not bare activate.
-        let needsRestore = wasHidden || info.isMinimized || !info.title.isEmpty
-        if needsRestore {
-            let ok = AccessibilityService.raiseScriptedWindow(
-                bundleID: info.bundleID,
-                appName: info.appName,
-                title: info.title,
-                pid: info.pid
-            )
-            if ok { return }
-        }
+        // Prefer frontmost PID over isActive — Electron apps often report isActive
+        // while another app is still frontmostApplication.
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let stillNotFront = frontPID != info.pid
+        let inLSList = Self.launchServicesForegroundBundles.contains(bundleID)
 
-        // Electron / Chromium apps: activate updates the menu bar but does not bring
-        // the window forward when the app was hidden. Launch Services reopen does.
-        let reopenBundles: Set<String> = [
-            "com.google.Chrome",
-            "com.google.Chrome.beta",
-            "com.google.Chrome.canary",
-            "com.apple.Safari",
-            "company.thebrowser.Browser",
-            "com.brave.Browser",
-            "org.mozilla.firefox",
-            "com.spotify.client",
-            "com.tinyspeck.slackmacgap",
-            "com.anthropic.claudefordesktop",
-            "com.microsoft.VSCode",
-            "com.todesktop.230313mzl4w4u92"
-        ]
-        if (wasHidden || info.isMinimized),
-           let bundleID = info.bundleID,
-           reopenBundles.contains(bundleID),
-           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
+        // Already frontmost after AX/scripted — never openApplication again (double-raise flash).
+        guard stillNotFront else { return }
+
+        // Launch Services reopen only for hidden/minimized Electron — using it on every
+        // visible switch flashes previous→target.
+        if inLSList && (wasHidden || info.isMinimized) {
+            ensureFrontmostViaLaunchServices(bundleID: bundleID)
             return
         }
 
-        AccessibilityService.forceShowApp(pid: info.pid, bundleID: info.bundleID)
+        AccessibilityService.forceShowApp(pid: info.pid, bundleID: bundleID)
     }
 
     /// Resolve the live AX window for a taskbar entry. When restoring a minimized
@@ -310,6 +352,9 @@ final class WindowManager {
     }
 
     private func cachedScriptedTitles(bundleID: String) -> [String] {
+        if shouldSuppressScriptedTitles {
+            return scriptedTitleCache[bundleID]?.titles ?? []
+        }
         if let cached = scriptedTitleCache[bundleID],
            Date().timeIntervalSince(cached.at) < scriptedTitleCacheTTL {
             return cached.titles
@@ -781,6 +826,18 @@ final class WindowManager {
                 }
                 .map(\.pid)
         )
+        // When *all* windows omit the onscreen flag (Claude, Slack, Calendar), the
+        // filter above keeps every large surface — including classic Electron GPU
+        // buffers (500×500, 800×600). Drop those only when a larger real sibling exists.
+        let pidsWithNonBufferCandidate = Set(
+            cgIndex
+                .filter {
+                    $0.bounds.width >= 200
+                        && $0.bounds.height >= 200
+                        && !Self.isLikelyElectronBuffer($0)
+                }
+                .map(\.pid)
+        )
 
         for entry in cgIndex {
             guard let app = appsByPID[entry.pid] else { continue }
@@ -793,10 +850,16 @@ final class WindowManager {
                 guard entry.isOnScreen else { continue }
             } else if pidsWithKnownOnscreen.contains(entry.pid) {
                 continue
+            } else if Self.isLikelyElectronBuffer(entry),
+                      pidsWithNonBufferCandidate.contains(entry.pid) {
+                continue
             } else {
                 guard entry.bounds.width >= 200, entry.bounds.height >= 200 else { continue }
             }
             guard entry.bounds.width >= 200, entry.bounds.height >= 200 else { continue }
+            // Calendar (and similar) exposes a narrow untitled inspector as its own CG
+            // window — drop it when a larger sibling exists for the same PID.
+            if Self.isLikelyAuxiliaryPanel(entry, all: cgIndex) { continue }
             cgSeenPID.insert(entry.pid)
             let windowID = "\(entry.pid)-\(entry.windowID)"
             if entry.pid == frontmostPID {
@@ -909,6 +972,38 @@ final class WindowManager {
         let isOnScreen: Bool
         /// False when CG omits kCGWindowIsOnscreen (common for offscreen buffers).
         let onScreenKnown: Bool
+    }
+
+    /// Untitled surfaces with classic Electron offscreen/GPU buffer sizes.
+    /// Only safe to drop when the same PID also has a non-buffer candidate.
+    private static func isLikelyElectronBuffer(_ entry: CGEntry) -> Bool {
+        guard !entry.onScreenKnown, entry.title.isEmpty else { return false }
+        let w = entry.bounds.width.rounded()
+        let h = entry.bounds.height.rounded()
+        // Store as (min, max) so orientation doesn't matter.
+        let pair: [CGFloat] = [min(w, h), max(w, h)]
+        let buffers: Set<[CGFloat]> = [
+            [500, 500],
+            [600, 800], // 800×600
+            [600, 600],
+            [300, 300],
+            [400, 400]
+        ]
+        return buffers.contains(pair)
+    }
+
+    /// Narrow untitled side panels (Calendar inspector ~300×1000) next to a real window.
+    private static func isLikelyAuxiliaryPanel(_ entry: CGEntry, all: [CGEntry]) -> Bool {
+        guard entry.title.isEmpty else { return false }
+        let w = entry.bounds.width
+        let h = entry.bounds.height
+        guard w >= 200, h >= 200, w <= 420 else { return false }
+        return all.contains { sib in
+            sib.pid == entry.pid
+                && sib.windowID != entry.windowID
+                && sib.bounds.width >= max(500, w * 2)
+                && sib.bounds.height >= 400
+        }
     }
 
     private func buildCGIndex() -> [CGEntry] {

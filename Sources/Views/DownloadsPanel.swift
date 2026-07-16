@@ -114,6 +114,8 @@ final class DownloadsPanelController {
     }
 
     private func show(relativeTo view: NSView) {
+        VolumePanelController.shared.hide()
+        WiFiPanelController.shared.hide()
         hide()
         guard let window = view.window else { return }
 

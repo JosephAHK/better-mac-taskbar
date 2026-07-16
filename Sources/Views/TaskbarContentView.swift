@@ -78,6 +78,19 @@ final class TaskbarContentView: NSView {
         reload()
     }
 
+    var isStartMenuVisible: Bool { startMenu.isVisible }
+
+    func hideStartMenu() {
+        guard startMenu.isVisible else { return }
+        startMenu.hide()
+        startOpen = false
+        startButton.setHighlighted(false)
+    }
+
+    func toggleStartMenuFromHotkey() {
+        toggleStart()
+    }
+
     private func toggleStart() {
         startOpen.toggle()
         startButton.setHighlighted(startOpen)
@@ -344,6 +357,12 @@ final class TaskbarContentView: NSView {
         }
         if DownloadsPanelController.shared.isVisible {
             DownloadsPanelController.shared.hide()
+        }
+        if VolumePanelController.shared.isVisible {
+            VolumePanelController.shared.hide()
+        }
+        if WiFiPanelController.shared.isVisible {
+            WiFiPanelController.shared.hide()
         }
         super.mouseDown(with: event)
     }

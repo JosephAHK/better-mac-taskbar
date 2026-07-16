@@ -5,7 +5,7 @@ final class SettingsWindowController: NSWindowController {
 
     private init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 496),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -25,6 +25,7 @@ final class SettingsWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
         if let view = window?.contentView as? SettingsView {
             view.reloadHiddenList()
+            view.reloadHotkeyDisplay()
         }
     }
 }
@@ -34,10 +35,19 @@ final class SettingsView: NSView {
     private let dockCheckbox = NSButton(checkboxWithTitle: "Hide Dock (use taskbar instead)", target: nil, action: nil)
     private let autoHideCheckbox = NSButton(checkboxWithTitle: "Automatically hide the taskbar", target: nil, action: nil)
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
+    private let hotkeyLabel = NSTextField(labelWithString: "Start menu hotkey")
+    private let hotkeyButton = NSButton(title: "", target: nil, action: nil)
+    private let hotkeyResetButton = NSButton(title: "Reset", target: nil, action: nil)
     private let hiddenSectionLabel = NSTextField(labelWithString: "Always hide on taskbar")
     private let hiddenEmptyLabel = NSTextField(labelWithString: "No apps hidden. Right-click a taskbar icon to add one.")
     private let hiddenScroll = NSScrollView()
     private let hiddenStack = NSStackView()
+
+    private var isRecordingHotkey = false
+    private var recordingFlagsMonitor: Any?
+    private var recordingKeyMonitor: Any?
+    private var recordingModifierKeyCode: UInt16?
+    private var recordingSawNonModifier = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -77,14 +87,35 @@ final class SettingsView: NSView {
         launchAtLoginCheckbox.autoresizingMask = [.minYMargin]
         addSubview(launchAtLoginCheckbox)
 
+        hotkeyLabel.font = NSFont.systemFont(ofSize: 13)
+        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 250, width: 140, height: 24)
+        hotkeyLabel.autoresizingMask = [.minYMargin]
+        addSubview(hotkeyLabel)
+
+        hotkeyButton.bezelStyle = .rounded
+        hotkeyButton.target = self
+        hotkeyButton.action = #selector(beginHotkeyRecording)
+        hotkeyButton.frame = NSRect(x: 170, y: frameRect.height - 252, width: 150, height: 28)
+        hotkeyButton.autoresizingMask = [.minYMargin]
+        hotkeyButton.toolTip = "Click, then press the shortcut you want for Start"
+        addSubview(hotkeyButton)
+
+        hotkeyResetButton.bezelStyle = .rounded
+        hotkeyResetButton.target = self
+        hotkeyResetButton.action = #selector(resetHotkey)
+        hotkeyResetButton.frame = NSRect(x: 328, y: frameRect.height - 252, width: 68, height: 28)
+        hotkeyResetButton.autoresizingMask = [.minYMargin]
+        hotkeyResetButton.toolTip = "Reset to ⌘ / Windows key"
+        addSubview(hotkeyResetButton)
+
         hiddenSectionLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 256, width: 300, height: 20)
+        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 300, width: 300, height: 20)
         hiddenSectionLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenSectionLabel)
 
         hiddenEmptyLabel.font = NSFont.systemFont(ofSize: 12)
         hiddenEmptyLabel.textColor = .secondaryLabelColor
-        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 280, width: 370, height: 18)
+        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 324, width: 370, height: 18)
         hiddenEmptyLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenEmptyLabel)
 
@@ -110,7 +141,7 @@ final class SettingsView: NSView {
         hiddenScroll.borderType = .bezelBorder
         hiddenScroll.drawsBackground = true
         hiddenScroll.backgroundColor = NSColor.controlBackgroundColor
-        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 396)
+        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 440)
         hiddenScroll.autoresizingMask = [.width, .height]
         addSubview(hiddenScroll)
 
@@ -124,14 +155,22 @@ final class SettingsView: NSView {
         addSubview(axNote)
 
         NotificationCenter.default.addObserver(self, selector: #selector(reloadHiddenList), name: .hiddenAppsChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reloadHotkeyDisplay), name: .startMenuHotkeyChanged, object: nil)
         reloadHiddenList()
+        reloadHotkeyDisplay()
     }
 
     deinit {
+        stopHotkeyRecording(restoreTitle: false)
         NotificationCenter.default.removeObserver(self)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc func reloadHotkeyDisplay() {
+        guard !isRecordingHotkey else { return }
+        hotkeyButton.title = TaskbarSettings.shared.startMenuHotkey.displayString
+    }
 
     @objc func reloadHiddenList() {
         hiddenStack.arrangedSubviews.forEach {
@@ -223,6 +262,105 @@ final class SettingsView: NSView {
         let want = launchAtLoginCheckbox.state == .on
         if !LaunchAtLogin.setEnabled(want) {
             launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
+        }
+    }
+
+    @objc private func resetHotkey() {
+        stopHotkeyRecording(restoreTitle: false)
+        TaskbarSettings.shared.startMenuHotkey = .default
+        reloadHotkeyDisplay()
+    }
+
+    @objc private func beginHotkeyRecording() {
+        if isRecordingHotkey {
+            stopHotkeyRecording(restoreTitle: true)
+            return
+        }
+
+        isRecordingHotkey = true
+        recordingModifierKeyCode = nil
+        recordingSawNonModifier = false
+        StartHotkeyMonitor.shared.isSuspended = true
+        hotkeyButton.title = "Press keys…"
+        hotkeyButton.highlight(true)
+
+        recordingKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleRecordingKeyDown(event) ?? event
+        }
+        recordingFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleRecordingFlagsChanged(event) ?? event
+        }
+    }
+
+    private func handleRecordingKeyDown(_ event: NSEvent) -> NSEvent? {
+        guard isRecordingHotkey else { return event }
+
+        if event.keyCode == 53 { // Escape cancels
+            stopHotkeyRecording(restoreTitle: true)
+            return nil
+        }
+
+        if StartMenuHotkey.modifierFlag(forKeyCode: event.keyCode) != nil {
+            return nil
+        }
+
+        recordingSawNonModifier = true
+        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        finishRecording(StartMenuHotkey(
+            keyCode: event.keyCode,
+            modifierFlags: mods.rawValue,
+            modifierOnly: false
+        ))
+        return nil
+    }
+
+    private func handleRecordingFlagsChanged(_ event: NSEvent) -> NSEvent? {
+        guard isRecordingHotkey else { return event }
+        guard let flag = StartMenuHotkey.modifierFlag(forKeyCode: event.keyCode) else { return nil }
+
+        let down = event.modifierFlags.contains(flag)
+        if down {
+            recordingModifierKeyCode = event.keyCode
+            recordingSawNonModifier = false
+            return nil
+        }
+
+        // Modifier released alone → treat as modifier-only Start key (e.g. ⌘ / Windows).
+        if let pressed = recordingModifierKeyCode,
+           StartMenuHotkey.isSameModifierKey(pressed, event.keyCode),
+           !recordingSawNonModifier {
+            finishRecording(StartMenuHotkey(
+                keyCode: pressed,
+                modifierFlags: flag.rawValue,
+                modifierOnly: true
+            ))
+        }
+        return nil
+    }
+
+    private func finishRecording(_ hotkey: StartMenuHotkey) {
+        TaskbarSettings.shared.startMenuHotkey = hotkey
+        stopHotkeyRecording(restoreTitle: false)
+        reloadHotkeyDisplay()
+        AppLog.info("startMenuHotkey set", ["hotkey": hotkey.displayString])
+    }
+
+    private func stopHotkeyRecording(restoreTitle: Bool) {
+        if let recordingKeyMonitor {
+            NSEvent.removeMonitor(recordingKeyMonitor)
+            self.recordingKeyMonitor = nil
+        }
+        if let recordingFlagsMonitor {
+            NSEvent.removeMonitor(recordingFlagsMonitor)
+            self.recordingFlagsMonitor = nil
+        }
+        isRecordingHotkey = false
+        recordingModifierKeyCode = nil
+        recordingSawNonModifier = false
+        StartHotkeyMonitor.shared.isSuspended = false
+        hotkeyButton.highlight(false)
+        if restoreTitle {
+            reloadHotkeyDisplay()
         }
     }
 }

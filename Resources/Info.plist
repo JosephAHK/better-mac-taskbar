@@ -36,5 +36,9 @@
 	<string>Better Mac Taskbar needs to control apps so clicking a taskbar icon can bring that specific window to the front.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Better Mac Taskbar needs Screen Recording access to show live window thumbnails when you hover taskbar icons.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Better Mac Taskbar needs Location access to scan nearby Wi‑Fi networks in the tray menu.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Better Mac Taskbar needs Location access to scan nearby Wi‑Fi networks in the tray menu.</string>
 </dict>
 </plist>
