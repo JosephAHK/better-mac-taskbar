@@ -568,7 +568,17 @@ final class WindowManager {
     /// off and CG intermittently omits a window (common for Electron apps like Claude).
     /// Match those as the same slot by pid (and title when an app has multiple windows).
     private func stabilizeOrder(_ next: [WindowInfo]) -> [WindowInfo] {
-        var remaining = Dictionary(uniqueKeysWithValues: next.map { ($0.id, $0) })
+        // Never use Dictionary(uniqueKeysWithValues:) — duplicate ids (e.g. two Chrome
+        // windows with the same title) trap with EXC_BREAKPOINT and kill the process.
+        var remaining = Dictionary(next.map { ($0.id, $0) }, uniquingKeysWith: { first, second in
+            AppLog.error("duplicate window id dropped", [
+                "id": first.id,
+                "pid": first.pid,
+                "keptTitle": first.title,
+                "droppedTitle": second.title
+            ])
+            return first
+        })
         var ordered: [WindowInfo] = []
         var idRemap: [String: String] = [:]
 
@@ -780,7 +790,9 @@ final class WindowManager {
 
             scriptedPIDs.insert(pid)
 
-            let ids = titles.map { "script-\(bundleID)-\($0)" }
+            // Include index so two windows with the same title get distinct ids.
+            // (Title-only ids crashed stabilizeOrder via Dictionary(uniqueKeysWithValues:).)
+            let ids = titles.enumerated().map { "script-\(bundleID)-\($0.offset)-\($0.element)" }
             // AppleScript returns windows front-to-back — index 0 is the real front window.
             let detectedFrontID = ids.first
             let activeID = (pid == frontmostPID)
