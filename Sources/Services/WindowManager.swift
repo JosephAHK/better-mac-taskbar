@@ -266,7 +266,7 @@ final class WindowManager {
             // Hidden apps (Spotify Cmd+H) often still report a CG frame with isMinimized=false
             // and an empty title — still need scripted deminiaturize / reopen, not bare activate.
             // Do NOT AppleScript-activate visible Electron apps — NSAppleScript runs in-process
-            // and makes Better Mac Taskbar frontmost (focus flash). Use forceShowApp below.
+            // and makes Better Mac Taskbar frontmost (focus flash). Use Launch Services / forceShow below.
             let needsRestore = wasHidden || info.isMinimized || !info.title.isEmpty
             if needsRestore {
                 _ = AccessibilityService.raiseScriptedWindow(
@@ -288,18 +288,52 @@ final class WindowManager {
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let stillNotFront = frontPID != info.pid
         let inLSList = Self.launchServicesForegroundBundles.contains(bundleID)
+        let realWindows = countRealWindows(pid: info.pid)
 
-        // Already frontmost after AX/scripted — never openApplication again (double-raise flash).
-        guard stillNotFront else { return }
+        // Without an AX raise, `activate()` often only flips the menu bar (Calendar,
+        // Mail, Notes, etc.) while windows stay hidden/unordered. Reopen via Launch
+        // Services whenever the app has no real window at all, or was hidden/minimized.
+        // Skip reopen when a window already exists — avoids spawning extras in Electron.
+        let needsLSReopen = liveMatch == nil
+            && (wasHidden || info.isMinimized || realWindows == 0)
 
-        // Launch Services reopen only for hidden/minimized Electron — using it on every
-        // visible switch flashes previous→target.
-        if inLSList && (wasHidden || info.isMinimized) {
+        if needsLSReopen {
             ensureFrontmostViaLaunchServices(bundleID: bundleID)
-            return
+        } else if stillNotFront {
+            if inLSList && (wasHidden || info.isMinimized) {
+                ensureFrontmostViaLaunchServices(bundleID: bundleID)
+            } else {
+                AccessibilityService.forceShowApp(pid: info.pid, bundleID: bundleID)
+                // activate can succeed (menu bar changes) without ordering any window front.
+                if countRealWindows(pid: info.pid) == 0 {
+                    ensureFrontmostViaLaunchServices(bundleID: bundleID)
+                }
+            }
         }
+    }
 
-        AccessibilityService.forceShowApp(pid: info.pid, bundleID: bundleID)
+    /// Layer-0 windows large enough to be a real app window, on any Space.
+    /// Deliberately not `.optionOnScreenOnly` — that flag only reports windows on
+    /// the *currently active* Space, so a Chrome/Electron window parked on another
+    /// Space would otherwise read as "no window" and trigger a needless LS reopen.
+    private func countRealWindows(pid: pid_t) -> Int {
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return 0
+        }
+        return info.filter { dict in
+            guard (dict[kCGWindowOwnerPID as String] as? pid_t) == pid else { return false }
+            let layer = dict[kCGWindowLayer as String] as? Int ?? -1
+            guard layer == 0 else { return false }
+            let alpha = dict[kCGWindowAlpha as String] as? Double ?? 1
+            guard alpha > 0.05 else { return false }
+            let bounds = dict[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            let w = bounds["Width"] ?? 0
+            let h = bounds["Height"] ?? 0
+            return w >= 200 && h >= 200
+        }.count
     }
 
     /// Resolve the live AX window for a taskbar entry. When restoring a minimized

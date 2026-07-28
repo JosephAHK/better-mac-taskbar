@@ -112,9 +112,8 @@ final class StartMenuController {
     }
 
     private func show(relativeTo view: NSView) {
-        VolumePanelController.shared.hide()
-        WiFiPanelController.shared.hide()
         DownloadsPanelController.shared.hide()
+        TrashPanelController.shared.hide()
         // Unhide before measuring the Start button so the menu anchors on-screen
         // when the taskbar was auto-hidden (e.g. Start key).
         if !panelWasVisible {

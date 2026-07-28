@@ -1,7 +1,7 @@
 import AppKit
 
-/// Taskbar Downloads button — opens a Finder-like list you can drag files out of.
-final class DownloadsButtonView: NSView {
+/// Taskbar Trash button — browse, restore, or empty the Trash without opening Finder.
+final class TrashButtonView: NSView {
     var onToggle: (() -> Void)?
     var isOpen = false {
         didSet { refreshAppearance() }
@@ -13,18 +13,12 @@ final class DownloadsButtonView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        toolTip = "Downloads"
+        toolTip = "Trash"
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iconView)
-
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        if let downloads {
-            iconView.image = NSWorkspace.shared.icon(forFile: downloads.path)
-        } else {
-            iconView.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Downloads")
-        }
+        refreshIcon()
 
         NSLayoutConstraint.activate([
             iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -35,6 +29,11 @@ final class DownloadsButtonView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The Finder-provided icon reflects full/empty state automatically.
+    func refreshIcon() {
+        iconView.image = NSWorkspace.shared.icon(forFile: TrashPanelView.trashRootURL().path)
+    }
 
     private func refreshAppearance() {
         if isOpen {
@@ -57,6 +56,7 @@ final class DownloadsButtonView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        refreshIcon()
         if !isOpen {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
         }
@@ -72,13 +72,13 @@ final class DownloadsButtonView: NSView {
 }
 
 /// Borderless panels refuse key status by default — search needs a key window.
-private final class KeyablePanel: NSPanel {
+private final class TrashKeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
 
-final class DownloadsPanelController {
-    static let shared = DownloadsPanelController()
+final class TrashPanelController {
+    static let shared = TrashPanelController()
 
     private var panel: NSPanel?
     private weak var anchor: NSView?
@@ -103,7 +103,7 @@ final class DownloadsPanelController {
         removeMonitors()
         panel?.orderOut(nil)
         panel = nil
-        if let button = anchor as? DownloadsButtonView {
+        if let button = anchor as? TrashButtonView {
             button.isOpen = false
         }
         anchor = nil
@@ -114,13 +114,13 @@ final class DownloadsPanelController {
     }
 
     private func show(relativeTo view: NSView) {
-        TrashPanelController.shared.hide()
+        DownloadsPanelController.shared.hide()
         hide()
         guard let window = view.window else { return }
 
         let width: CGFloat = 340
         let height: CGFloat = 420
-        let content = DownloadsPanelView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let content = TrashPanelView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         content.onOpenInFinder = { [weak self] url in
             NSWorkspace.shared.open(url)
             self?.hide()
@@ -137,8 +137,13 @@ final class DownloadsPanelController {
         content.onDragEnded = { [weak self] in
             self?.isDraggingFile = false
         }
+        content.onEmptiedTrash = { [weak self] in
+            if let button = self?.anchor as? TrashButtonView {
+                button.refreshIcon()
+            }
+        }
 
-        let panel = KeyablePanel(
+        let panel = TrashKeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
@@ -163,14 +168,13 @@ final class DownloadsPanelController {
         // Accessory (LSUIElement) apps must activate before a panel can take keyboard focus.
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        // Defer so the run loop finishes making the panel key first.
         DispatchQueue.main.async {
             content.focusSearch()
         }
 
         self.panel = panel
         self.anchor = view
-        if let button = view as? DownloadsButtonView {
+        if let button = view as? TrashButtonView {
             button.isOpen = true
         }
         installMonitors()
@@ -196,8 +200,7 @@ final class DownloadsPanelController {
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         guard isVisible else { return event }
         if event.keyCode == 53 { // Escape
-            // Let the search field clear its query first; only close when empty.
-            if let content = panel?.contentView as? DownloadsPanelView, content.hasSearchQuery {
+            if let content = panel?.contentView as? TrashPanelView, content.hasSearchQuery {
                 return event
             }
             hide()
@@ -231,30 +234,37 @@ final class DownloadsPanelController {
 
 /// One directory listing entry — carries `isDirectory` alongside the URL so
 /// activation logic doesn't need to re-stat the filesystem on every click.
-private struct DownloadEntry {
+private struct TrashEntry {
     let url: URL
     let isDirectory: Bool
 }
 
-final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
+final class TrashPanelView: NSView, NSSearchFieldDelegate {
     var onOpenInFinder: ((URL) -> Void)?
     var onFileOpened: (() -> Void)?
     var onRequestClose: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
+    /// Fired after Empty Trash completes, so the tray icon can refresh to its empty state.
+    var onEmptiedTrash: (() -> Void)?
 
-    private let titleLabel = NSTextField(labelWithString: "Downloads")
+    private let titleLabel = NSTextField(labelWithString: "Trash")
     private let backButton = NSButton()
     private let searchField = NSSearchField()
     private let scroll = NSScrollView()
     private let stack = NSStackView()
     private var folderWatcher: DispatchSourceFileSystemObject?
     private var folderFD: Int32 = -1
-    private var allFiles: [DownloadEntry] = []
-    private var filteredFiles: [DownloadEntry] = []
-    private lazy var currentURL: URL = downloadsURL()
+    private var allFiles: [TrashEntry] = []
+    private var filteredFiles: [TrashEntry] = []
+    private lazy var currentURL: URL = Self.trashRootURL()
     private var backStack: [URL] = []
     private var isAtRoot: Bool { backStack.isEmpty }
+
+    static func trashRootURL() -> URL {
+        (try? FileManager.default.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: nil, create: false))
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash")
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -285,7 +295,6 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         backButton.isBordered = false
         backButton.target = self
         backButton.action = #selector(goBack)
-        backButton.toolTip = "Back"
         backButton.isHidden = true
         backButton.translatesAutoresizingMaskIntoConstraints = false
 
@@ -295,14 +304,21 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         headerStack.alignment = .centerY
         headerStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let openButton = NSButton(title: "Open in Finder", target: self, action: #selector(openFinder))
+        let emptyButton = NSButton(title: "Empty", target: self, action: #selector(emptyTapped))
+        emptyButton.bezelStyle = .inline
+        emptyButton.isBordered = false
+        emptyButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        emptyButton.contentTintColor = .systemRed
+        emptyButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let openButton = NSButton(title: "Finder", target: self, action: #selector(openFinder))
         openButton.bezelStyle = .inline
         openButton.isBordered = false
         openButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         openButton.contentTintColor = NSColor(calibratedRed: 0.35, green: 0.72, blue: 1, alpha: 1)
         openButton.translatesAutoresizingMaskIntoConstraints = false
 
-        searchField.placeholderString = "Search downloads"
+        searchField.placeholderString = "Search trash"
         searchField.sendsSearchStringImmediately = true
         searchField.sendsWholeSearchString = false
         searchField.focusRingType = .none
@@ -312,6 +328,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(headerStack)
+        addSubview(emptyButton)
         addSubview(openButton)
         addSubview(searchField)
 
@@ -342,11 +359,14 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         NSLayoutConstraint.activate([
             headerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             headerStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            headerStack.trailingAnchor.constraint(lessThanOrEqualTo: openButton.leadingAnchor, constant: -8),
+            headerStack.trailingAnchor.constraint(lessThanOrEqualTo: emptyButton.leadingAnchor, constant: -8),
             backButton.widthAnchor.constraint(equalToConstant: 14),
 
             openButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             openButton.centerYAnchor.constraint(equalTo: headerStack.centerYAnchor),
+
+            emptyButton.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -10),
+            emptyButton.centerYAnchor.constraint(equalTo: headerStack.centerYAnchor),
 
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -375,7 +395,6 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         guard let window else { return }
         window.makeKey()
         window.makeFirstResponder(searchField)
-        // Select any existing text so typing replaces it immediately.
         if let editor = window.fieldEditor(true, for: searchField) as? NSTextView {
             editor.selectAll(nil)
         }
@@ -398,6 +417,34 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         updateHeader()
         reloadFromDisk()
         startWatching()
+    }
+
+    @objc private func emptyTapped() {
+        let alert = NSAlert()
+        alert.messageText = "Empty Trash?"
+        alert.informativeText = "This will permanently erase the items in the Trash. This can’t be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Empty Trash")
+        alert.addButton(withTitle: "Cancel")
+        if #available(macOS 11.0, *) {
+            alert.buttons.first?.hasDestructiveAction = true
+        }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let root = Self.trashRootURL()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
+            TrashOriginStore.removeAll(under: root)
+            DispatchQueue.main.async { [weak self] in
+                self?.backStack.removeAll()
+                self?.currentURL = root
+                self?.updateHeader()
+                self?.reloadFromDisk()
+                self?.startWatching()
+                self?.onEmptiedTrash?()
+            }
+        }
     }
 
     @objc private func searchChanged(_ sender: NSSearchField) {
@@ -433,7 +480,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     }
 
     /// Navigate into a folder in-place, or open a file with its default app.
-    private func activate(_ entry: DownloadEntry) {
+    private func activate(_ entry: TrashEntry) {
         if entry.isDirectory {
             navigate(to: entry.url)
         } else {
@@ -452,24 +499,54 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     }
 
     private func updateHeader() {
-        titleLabel.stringValue = isAtRoot ? "Downloads" : currentURL.lastPathComponent
+        titleLabel.stringValue = isAtRoot ? "Trash" : currentURL.lastPathComponent
         backButton.isHidden = isAtRoot
     }
 
-    private func delete(_ entry: DownloadEntry) {
-        var resultingItemURL: NSURL?
+    /// Restore only works reliably for items this app itself trashed (tracked origin) —
+    /// items Finder trashed (or trashed before this store existed) have no known origin,
+    /// so we tell the user rather than guessing a destination.
+    private func restore(_ entry: TrashEntry) {
+        guard let original = TrashOriginStore.originalURL(for: entry.url) else {
+            showAlert(
+                title: "Can’t Restore “\(entry.url.lastPathComponent)”",
+                message: "Better Mac Taskbar doesn’t know where this item was trashed from. Use Finder’s Trash (right-click → Put Back) instead."
+            )
+            return
+        }
+        let fm = FileManager.default
+        let parent = original.deletingLastPathComponent()
+        guard fm.fileExists(atPath: parent.path) else {
+            showAlert(
+                title: "Can’t Restore “\(entry.url.lastPathComponent)”",
+                message: "Its original folder no longer exists."
+            )
+            return
+        }
+        var destination = original
+        if fm.fileExists(atPath: destination.path) {
+            let ext = destination.pathExtension
+            let base = destination.deletingPathExtension().lastPathComponent
+            destination = ext.isEmpty
+                ? parent.appendingPathComponent("\(base) (Restored)")
+                : parent.appendingPathComponent("\(base) (Restored)").appendingPathExtension(ext)
+        }
         do {
-            try FileManager.default.trashItem(at: entry.url, resultingItemURL: &resultingItemURL)
-            if let trashedURL = resultingItemURL as URL? {
-                TrashOriginStore.record(trashedURL: trashedURL, originalURL: entry.url)
-            }
-        } catch {}
-        reloadFromDisk()
+            try fm.moveItem(at: entry.url, to: destination)
+            TrashOriginStore.remove(trashedURL: entry.url)
+            reloadFromDisk()
+        } catch {
+            showAlert(title: "Couldn’t Restore “\(entry.url.lastPathComponent)”", message: error.localizedDescription)
+        }
     }
 
-    private func downloadsURL() -> URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+    private func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func reloadFromDisk() {
@@ -484,7 +561,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
         let entries = files.map { fileURL in
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            return DownloadEntry(url: fileURL, isDirectory: isDirectory)
+            return TrashEntry(url: fileURL, isDirectory: isDirectory)
         }
         allFiles = entries.sorted { a, b in
             let da = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -513,7 +590,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
         if filteredFiles.isEmpty {
             let message = allFiles.isEmpty
-                ? (isAtRoot ? "No downloads yet" : "This folder is empty")
+                ? (isAtRoot ? "Trash is empty" : "This folder is empty")
                 : "No matches"
             let empty = NSTextField(labelWithString: message)
             empty.font = NSFont.systemFont(ofSize: 13)
@@ -536,16 +613,17 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         // Cap the unfiltered list for responsiveness; show every match when searching.
         let displayed = query.isEmpty ? Array(filteredFiles.prefix(150)) : filteredFiles
         let rowWidth = max(bounds.width - 16, 300)
+        let allowsRestore = isAtRoot
         for entry in displayed {
-            let row = DownloadsFileRow(entry: entry, width: rowWidth)
+            let row = TrashFileRow(entry: entry, width: rowWidth, allowsRestore: allowsRestore)
             row.onOpen = { [weak self] in
                 self?.activate(entry)
             }
             row.onReveal = {
                 NSWorkspace.shared.activateFileViewerSelecting([entry.url])
             }
-            row.onDelete = { [weak self] in
-                self?.delete(entry)
+            row.onRestore = { [weak self] in
+                self?.restore(entry)
             }
             row.onDragBegan = { [weak self] in self?.onDragBegan?() }
             row.onDragEnded = { [weak self] in self?.onDragEnded?() }
@@ -583,23 +661,25 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     }
 }
 
-private final class DownloadsFileRow: NSView, NSDraggingSource {
+private final class TrashFileRow: NSView, NSDraggingSource {
     let url: URL
     let isDirectory: Bool
     var onOpen: (() -> Void)?
     var onReveal: (() -> Void)?
-    var onDelete: (() -> Void)?
+    var onRestore: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
 
-    private let deleteButton = NSButton()
+    private let restoreButton = NSButton()
+    private let allowsRestore: Bool
     private var tracking: NSTrackingArea?
     private var mouseDownPoint: NSPoint?
     private var didStartDrag = false
 
-    init(entry: DownloadEntry, width: CGFloat) {
+    init(entry: TrashEntry, width: CGFloat, allowsRestore: Bool) {
         self.url = entry.url
         self.isDirectory = entry.isDirectory
+        self.allowsRestore = allowsRestore
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 40))
         wantsLayer = true
         layer?.cornerRadius = 4
@@ -609,7 +689,7 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
         icon.image = NSWorkspace.shared.icon(forFile: url.path)
         addSubview(icon)
 
-        let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - 24
+        let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - (allowsRestore ? 24 : 0)
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = NSFont.systemFont(ofSize: 13)
         name.textColor = .labelColor
@@ -625,15 +705,17 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
             addSubview(chevron)
         }
 
-        deleteButton.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
-        deleteButton.bezelStyle = .inline
-        deleteButton.isBordered = false
-        deleteButton.contentTintColor = .secondaryLabelColor
-        deleteButton.target = self
-        deleteButton.action = #selector(deleteTapped)
-        deleteButton.isHidden = true
-        deleteButton.frame = NSRect(x: width - 26, y: 9, width: 22, height: 22)
-        addSubview(deleteButton)
+        if allowsRestore {
+            restoreButton.image = NSImage(systemSymbolName: "arrow.up.bin", accessibilityDescription: "Restore")
+            restoreButton.bezelStyle = .inline
+            restoreButton.isBordered = false
+            restoreButton.contentTintColor = .secondaryLabelColor
+            restoreButton.target = self
+            restoreButton.action = #selector(restoreTapped)
+            restoreButton.isHidden = true
+            restoreButton.frame = NSRect(x: width - 26, y: 9, width: 22, height: 22)
+            addSubview(restoreButton)
+        }
 
         heightAnchor.constraint(equalToConstant: 40).isActive = true
     }
@@ -654,16 +736,16 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
 
     override func mouseEntered(with event: NSEvent) {
         layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        deleteButton.isHidden = false
+        if allowsRestore { restoreButton.isHidden = false }
     }
 
     override func mouseExited(with event: NSEvent) {
         layer?.backgroundColor = NSColor.clear.cgColor
-        deleteButton.isHidden = true
+        if allowsRestore { restoreButton.isHidden = true }
     }
 
-    @objc private func deleteTapped() {
-        onDelete?()
+    @objc private func restoreTapped() {
+        onRestore?()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -695,7 +777,6 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
             didStartDrag = false
         }
         guard !didStartDrag else { return }
-        // Finder-style: open on double-click only (single-click is for drag/select).
         guard event.clickCount >= 2 else { return }
         if event.modifierFlags.contains(.command) {
             onReveal?()

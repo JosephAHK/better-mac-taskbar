@@ -54,9 +54,6 @@ final class TaskbarContentView: NSView {
         tray.onShowDesktop = {
             AccessibilityService.toggleShowDesktop()
         }
-        tray.onOpenSettings = {
-            SettingsWindowController.shared.show()
-        }
 
         NSLayoutConstraint.activate([
             startButton.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -67,7 +64,6 @@ final class TaskbarContentView: NSView {
             tray.trailingAnchor.constraint(equalTo: trailingAnchor),
             tray.topAnchor.constraint(equalTo: topAnchor),
             tray.bottomAnchor.constraint(equalTo: bottomAnchor),
-            tray.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
 
             tasksContainer.leadingAnchor.constraint(equalTo: startButton.trailingAnchor),
             tasksContainer.trailingAnchor.constraint(equalTo: tray.leadingAnchor),
@@ -358,11 +354,8 @@ final class TaskbarContentView: NSView {
         if DownloadsPanelController.shared.isVisible {
             DownloadsPanelController.shared.hide()
         }
-        if VolumePanelController.shared.isVisible {
-            VolumePanelController.shared.hide()
-        }
-        if WiFiPanelController.shared.isVisible {
-            WiFiPanelController.shared.hide()
+        if TrashPanelController.shared.isVisible {
+            TrashPanelController.shared.hide()
         }
         super.mouseDown(with: event)
     }

@@ -2,18 +2,14 @@ import AppKit
 
 final class TrayView: NSView {
     var onShowDesktop: (() -> Void)?
-    var onOpenSettings: (() -> Void)?
 
     private let downloadsButton = DownloadsButtonView()
-    private let wifiButton = NSButton()
-    private let volumeButton = NSButton()
+    private let trashButton = TrashButtonView()
     private let clockButton = NSButton()
     private let timeLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
     private let showDesktop = ShowDesktopButtonView()
-    private let actionCenter = NSButton()
     private var clockTimer: Timer?
-    private var volumeIconTimer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -31,7 +27,6 @@ final class TrayView: NSView {
 
     deinit {
         clockTimer?.invalidate()
-        volumeIconTimer?.invalidate()
     }
 
     private func setup() {
@@ -48,24 +43,13 @@ final class TrayView: NSView {
             DownloadsPanelController.shared.toggle(relativeTo: self.downloadsButton)
         }
 
+        trashButton.translatesAutoresizingMaskIntoConstraints = false
+        trashButton.onToggle = { [weak self] in
+            guard let self else { return }
+            TrashPanelController.shared.toggle(relativeTo: self.trashButton)
+        }
+
         let downloadsDivider = makeDivider()
-
-        let chevron = makeTrayIconButton(systemName: "chevron.up", toolTip: "Hidden icons")
-
-        configureTrayIconButton(wifiButton, systemName: "wifi", toolTip: "Network")
-        wifiButton.target = self
-        wifiButton.action = #selector(toggleWiFiMenu)
-
-        configureTrayIconButton(volumeButton, systemName: VolumeService.speakerSymbolName(), toolTip: "Volume")
-        volumeButton.target = self
-        volumeButton.action = #selector(toggleVolumeSlider)
-
-        volumeIconTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.refreshVolumeIcon()
-        }
-        if let volumeIconTimer {
-            RunLoop.main.add(volumeIconTimer, forMode: .common)
-        }
 
         timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         timeLabel.textColor = .labelColor
@@ -88,37 +72,21 @@ final class TrayView: NSView {
         clockButton.translatesAutoresizingMaskIntoConstraints = false
         clockStack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            clockButton.widthAnchor.constraint(equalToConstant: 90),
             clockButton.heightAnchor.constraint(equalToConstant: TaskbarSettings.barHeight),
             clockStack.centerYAnchor.constraint(equalTo: clockButton.centerYAnchor),
-            clockStack.trailingAnchor.constraint(equalTo: clockButton.trailingAnchor, constant: -8),
-            clockStack.leadingAnchor.constraint(equalTo: clockButton.leadingAnchor, constant: 4)
+            clockStack.trailingAnchor.constraint(equalTo: clockButton.trailingAnchor, constant: -10),
+            clockStack.leadingAnchor.constraint(equalTo: clockButton.leadingAnchor, constant: 10)
         ])
-
-        actionCenter.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right", accessibilityDescription: "Action Center")
-        actionCenter.bezelStyle = .inline
-        actionCenter.isBordered = false
-        actionCenter.target = self
-        actionCenter.action = #selector(openSettings)
-        actionCenter.toolTip = "Settings"
-        actionCenter.translatesAutoresizingMaskIntoConstraints = false
-        actionCenter.widthAnchor.constraint(equalToConstant: 40).isActive = true
 
         showDesktop.onClick = { [weak self] in
             self?.onShowDesktop?()
         }
         showDesktop.translatesAutoresizingMaskIntoConstraints = false
 
-        let desktopDivider = makeDivider()
-
         stack.addArrangedSubview(downloadsButton)
+        stack.addArrangedSubview(trashButton)
         stack.addArrangedSubview(downloadsDivider)
-        stack.addArrangedSubview(chevron)
-        stack.addArrangedSubview(wifiButton)
-        stack.addArrangedSubview(volumeButton)
         stack.addArrangedSubview(clockButton)
-        stack.addArrangedSubview(actionCenter)
-        stack.addArrangedSubview(desktopDivider)
         stack.addArrangedSubview(showDesktop)
 
         NSLayoutConstraint.activate([
@@ -129,6 +97,9 @@ final class TrayView: NSView {
 
             downloadsButton.widthAnchor.constraint(equalTo: heightAnchor),
             downloadsButton.heightAnchor.constraint(equalTo: heightAnchor),
+
+            trashButton.widthAnchor.constraint(equalTo: heightAnchor),
+            trashButton.heightAnchor.constraint(equalTo: heightAnchor),
 
             showDesktop.widthAnchor.constraint(equalToConstant: 14),
             showDesktop.heightAnchor.constraint(equalTo: stack.heightAnchor)
@@ -154,26 +125,6 @@ final class TrayView: NSView {
         return wrap
     }
 
-    private func makeTrayIconButton(systemName: String, toolTip: String) -> NSButton {
-        let button = NSButton()
-        configureTrayIconButton(button, systemName: systemName, toolTip: toolTip)
-        return button
-    }
-
-    private func configureTrayIconButton(_ button: NSButton, systemName: String, toolTip: String) {
-        button.image = NSImage(systemSymbolName: systemName, accessibilityDescription: toolTip)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.toolTip = toolTip
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 32).isActive = true
-    }
-
-    private func refreshVolumeIcon() {
-        let name = VolumeService.speakerSymbolName()
-        volumeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: "Volume")
-    }
-
     private func tick() {
         let now = Date()
         let timeFmt = DateFormatter()
@@ -182,18 +133,6 @@ final class TrayView: NSView {
         dateFmt.dateFormat = "M/d/yyyy"
         timeLabel.stringValue = timeFmt.string(from: now)
         dateLabel.stringValue = dateFmt.string(from: now)
-    }
-
-    @objc private func openSettings() { onOpenSettings?() }
-
-    @objc private func toggleWiFiMenu() {
-        VolumePanelController.shared.hide()
-        WiFiPanelController.shared.toggle(relativeTo: wifiButton)
-    }
-
-    @objc private func toggleVolumeSlider() {
-        WiFiPanelController.shared.hide()
-        VolumePanelController.shared.toggle(relativeTo: volumeButton)
     }
 
     @objc private func openDateTime() {

@@ -214,6 +214,9 @@ enum AccessibilityService {
         if restored is false then
           try
             tell application \(tellTarget)
+              try
+                reopen
+              end try
               activate
               try
                 set miniaturized of every window to false
