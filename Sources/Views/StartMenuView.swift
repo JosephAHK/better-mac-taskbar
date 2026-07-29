@@ -83,6 +83,8 @@ final class StartMenuController {
     private var panelWasVisible = false
     private var localMonitor: Any?
     private var globalMonitor: Any?
+    /// True while a submenu (e.g. the power menu) owns the mouse.
+    private var suppressDismiss = false
 
     /// Fired whenever the menu is dismissed (outside click, launch, settings, toggle, etc.).
     var onHide: (() -> Void)?
@@ -99,6 +101,7 @@ final class StartMenuController {
 
     func hide() {
         let wasVisible = panel != nil
+        suppressDismiss = false
         removeMonitors()
         panel?.orderOut(nil)
         panel = nil
@@ -135,6 +138,18 @@ final class StartMenuController {
         content.onQuit = {
             AppLog.info("quit requested", ["source": "startMenu"])
             NSApp.terminate(nil)
+        }
+        content.onPower = { [weak self] action in
+            self?.hide()
+            // Run after the menu's tracking loop unwinds — alerts and AppleScript
+            // misbehave inside it.
+            DispatchQueue.main.async {
+                guard PowerActionRunner.confirm(action) else { return }
+                PowerActionRunner.perform(action)
+            }
+        }
+        content.onMenuSessionChange = { [weak self] active in
+            self?.suppressDismiss = active
         }
         content.onRequestClose = { [weak self] in
             self?.hide()
@@ -188,7 +203,8 @@ final class StartMenuController {
             return event
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.hide()
+            guard let self, !self.suppressDismiss else { return }
+            self.hide()
         }
     }
 
@@ -216,7 +232,7 @@ final class StartMenuController {
     }
 
     private func handleMouseDown(_ event: NSEvent) {
-        guard let panel else { return }
+        guard let panel, !suppressDismiss else { return }
         let location = NSEvent.mouseLocation
         if panel.frame.contains(location) { return }
         // Let the Start button handle its own toggle.
@@ -292,10 +308,103 @@ fileprivate enum AppCatalog {
     }
 }
 
+/// Footer control with a Windows-style hover highlight.
+final class StartMenuFooterButton: NSView {
+    var onClick: (() -> Void)?
+
+    private var tracking: NSTrackingArea?
+    private var isHovered = false
+    private let label = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
+
+    init(title: String, symbolName: String? = nil, tooltip: String? = nil) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+        translatesAutoresizingMaskIntoConstraints = false
+        toolTip = tooltip
+
+        let content = NSStackView()
+        content.orientation = .horizontal
+        content.spacing = 6
+        content.alignment = .centerY
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        if let symbolName, let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+            iconView.image = image
+            iconView.contentTintColor = .secondaryLabelColor
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            content.addArrangedSubview(iconView)
+            NSLayoutConstraint.activate([
+                iconView.widthAnchor.constraint(equalToConstant: 14),
+                iconView.heightAnchor.constraint(equalToConstant: 14)
+            ])
+        }
+
+        if !title.isEmpty {
+            label.stringValue = title
+            label.font = NSFont.systemFont(ofSize: 13)
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+            content.addArrangedSubview(label)
+        }
+
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.centerXAnchor.constraint(equalTo: centerXAnchor),
+            content.centerYAnchor.constraint(equalTo: centerYAnchor),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 6),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Keeps the highlight lit while an attached menu is open.
+    var isActive = false {
+        didSet { refreshHighlight() }
+    }
+
+    private func refreshHighlight() {
+        if isHovered || isActive {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(isHovered ? 0.16 : 0.10).cgColor
+            label.textColor = .labelColor
+            iconView.contentTintColor = .labelColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            label.textColor = .secondaryLabelColor
+            iconView.contentTintColor = .secondaryLabelColor
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        tracking = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(tracking!)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        refreshHighlight()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        refreshHighlight()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
 final class StartMenuView: NSView, NSSearchFieldDelegate {
     var onLaunch: ((String) -> Void)?
     var onSettings: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onPower: ((PowerAction) -> Void)?
+    var onMenuSessionChange: ((Bool) -> Void)?
     var onRequestClose: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "PINNED")
@@ -303,6 +412,7 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
     private let scroll = NSScrollView()
     private let stack = NSStackView()
     private let document = NSView()
+    private let powerButton = StartMenuFooterButton(title: "", symbolName: "power", tooltip: "Power")
 
     private var pinnedApps: [(String, String)] = []
     private var filteredApps: [(String, String)] = []
@@ -366,12 +476,15 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         pinnedApps = Self.loadPinnedApps()
         rebuildRows(apps: pinnedApps, allowSelection: false)
 
-        let settings = makeFooterButton(title: "Settings", action: #selector(settingsClicked))
-        let quit = makeFooterButton(title: "Quit Taskbar", action: #selector(quitClicked))
-        settings.translatesAutoresizingMaskIntoConstraints = false
-        quit.translatesAutoresizingMaskIntoConstraints = false
+        let settings = StartMenuFooterButton(title: "Settings", symbolName: "gearshape")
+        settings.onClick = { [weak self] in self?.onSettings?() }
+        let quit = StartMenuFooterButton(title: "Quit Taskbar", symbolName: "xmark.circle")
+        quit.onClick = { [weak self] in self?.onQuit?() }
+        let power = powerButton
+        power.onClick = { [weak self] in self?.showPowerMenu() }
         addSubview(settings)
         addSubview(quit)
+        addSubview(power)
 
         let searchHeight = searchField.heightAnchor.constraint(equalToConstant: 0)
         searchHeightConstraint = searchHeight
@@ -401,9 +514,14 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
             settings.trailingAnchor.constraint(equalTo: centerXAnchor, constant: -2),
 
             quit.leadingAnchor.constraint(equalTo: centerXAnchor, constant: 2),
-            quit.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            quit.trailingAnchor.constraint(equalTo: power.leadingAnchor, constant: -4),
             quit.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            quit.heightAnchor.constraint(equalToConstant: 36)
+            quit.heightAnchor.constraint(equalToConstant: 36),
+
+            power.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            power.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            power.widthAnchor.constraint(equalToConstant: 40),
+            power.heightAnchor.constraint(equalToConstant: 36)
         ])
 
         NSLayoutConstraint.activate([
@@ -701,18 +819,37 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         return row
     }
 
-    private func makeFooterButton(title: String, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.contentTintColor = .secondaryLabelColor
-        button.font = NSFont.systemFont(ofSize: 13)
-        button.wantsLayer = true
-        return button
+    private func showPowerMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for action in PowerAction.allCases {
+            let item = NSMenuItem(title: action.title, action: #selector(powerItemClicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = PowerActionBox(action)
+            item.image = NSImage(systemSymbolName: action.symbolName, accessibilityDescription: action.title)
+            menu.addItem(item)
+        }
+
+        powerButton.isActive = true
+        // NSMenu runs its own tracking loop — suppress the outside-click dismissal so
+        // the Start panel isn't torn down underneath the menu.
+        onMenuSessionChange?(true)
+        let origin = NSPoint(x: 0, y: powerButton.bounds.height + 4)
+        menu.popUp(positioning: nil, at: origin, in: powerButton)
+        onMenuSessionChange?(false)
+        powerButton.isActive = false
     }
 
-    @objc private func settingsClicked() { onSettings?() }
-    @objc private func quitClicked() { onQuit?() }
+    @objc private func powerItemClicked(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? PowerActionBox else { return }
+        onPower?(box.action)
+    }
+}
+
+/// NSMenuItem.representedObject needs a class type — PowerAction is an enum.
+private final class PowerActionBox: NSObject {
+    let action: PowerAction
+    init(_ action: PowerAction) { self.action = action }
 }
 
 final class StartMenuRow: NSView {
