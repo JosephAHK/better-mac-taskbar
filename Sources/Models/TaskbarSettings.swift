@@ -251,5 +251,6 @@ extension Notification.Name {
     static let hiddenAppsChanged = Notification.Name("hiddenAppsChanged")
     static let taskbarOrderChanged = Notification.Name("taskbarOrderChanged")
     static let windowsUpdated = Notification.Name("windowsUpdated")
+    static let launchingAppsChanged = Notification.Name("launchingAppsChanged")
     static let startMenuHotkeyChanged = Notification.Name("startMenuHotkeyChanged")
 }
