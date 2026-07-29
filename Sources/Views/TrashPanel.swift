@@ -116,7 +116,11 @@ final class TrashPanelController {
     private func show(relativeTo view: NSView) {
         DownloadsPanelController.shared.hide()
         hide()
-        guard let window = view.window else { return }
+        guard let window = view.window else {
+            AppLog.warn("TrashPanel.show aborted, anchor has no window")
+            return
+        }
+        AppLog.info("TrashPanel.show")
 
         let width: CGFloat = 340
         let height: CGFloat = 420
@@ -429,12 +433,22 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         if #available(macOS 11.0, *) {
             alert.buttons.first?.hasDestructiveAction = true
         }
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            AppLog.info("emptyTrash cancelled")
+            return
+        }
 
         let root = Self.trashRootURL()
+        AppLog.info("emptyTrash confirmed", ["items": allFiles.count])
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
             NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
+            if let error {
+                AppLog.warn("emptyTrash script error", [
+                    "errNum": error[NSAppleScript.errorNumber] as? Int ?? 0,
+                    "errMsg": error[NSAppleScript.errorMessage] as? String ?? "\(error)"
+                ])
+            }
             TrashOriginStore.removeAll(under: root)
             DispatchQueue.main.async { [weak self] in
                 self?.backStack.removeAll()
@@ -508,6 +522,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     /// so we tell the user rather than guessing a destination.
     private func restore(_ entry: TrashEntry) {
         guard let original = TrashOriginStore.originalURL(for: entry.url) else {
+            AppLog.info("restore blocked, unknown origin", ["name": entry.url.lastPathComponent])
             showAlert(
                 title: "Can’t Restore “\(entry.url.lastPathComponent)”",
                 message: "Better Mac Taskbar doesn’t know where this item was trashed from. Use Finder’s Trash (right-click → Put Back) instead."
@@ -517,6 +532,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         let fm = FileManager.default
         let parent = original.deletingLastPathComponent()
         guard fm.fileExists(atPath: parent.path) else {
+            AppLog.warn("restore blocked, origin folder missing", ["parent": parent.path])
             showAlert(
                 title: "Can’t Restore “\(entry.url.lastPathComponent)”",
                 message: "Its original folder no longer exists."
@@ -534,8 +550,14 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         do {
             try fm.moveItem(at: entry.url, to: destination)
             TrashOriginStore.remove(trashedURL: entry.url)
+            AppLog.info("restore ok", ["to": destination.path])
             reloadFromDisk()
         } catch {
+            AppLog.warn("restore failed", [
+                "from": entry.url.path,
+                "to": destination.path,
+                "error": error.localizedDescription
+            ])
             showAlert(title: "Couldn’t Restore “\(entry.url.lastPathComponent)”", message: error.localizedDescription)
         }
     }
@@ -553,11 +575,17 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         let url = currentURL
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .nameKey]
-        let files = (try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        let files: [URL]
+        do {
+            files = try fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            AppLog.warn("trash listing failed", ["path": url.path, "error": error.localizedDescription])
+            files = []
+        }
 
         let entries = files.map { fileURL in
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
@@ -636,7 +664,11 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         stopWatching()
         let path = currentURL.path
         folderFD = open(path, O_EVTONLY)
-        guard folderFD >= 0 else { return }
+        guard folderFD >= 0 else {
+            // Without this fd the list only refreshes on reopen.
+            AppLog.warn("trash watcher open failed", ["path": path, "errno": errno])
+            return
+        }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: folderFD,
             eventMask: [.write, .rename, .delete, .extend, .attrib],

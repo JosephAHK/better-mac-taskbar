@@ -88,6 +88,7 @@ final class TaskbarContentView: NSView {
     }
 
     private func toggleStart() {
+        AppLog.info("startButton toggle", ["opening": !startOpen])
         startOpen.toggle()
         startButton.setHighlighted(startOpen)
         startMenu.toggle(relativeTo: startButton)
@@ -98,13 +99,22 @@ final class TaskbarContentView: NSView {
     }
 
     @objc func reload() {
-        if isDraggingIcon { return }
-
-        let items = Self.orderedDisplayItems()
-        if applyInPlaceIfPossible(items) {
+        if isDraggingIcon {
+            AppLog.debug("reload skipped, drag in progress")
             return
         }
 
+        let items = Self.orderedDisplayItems()
+        if applyInPlaceIfPossible(items) {
+            AppLog.throttled("reloadInPlace", seconds: 10, "reload in place", ["items": items.count])
+            return
+        }
+
+        // Full rebuild flashes the strip — frequent lines here mean icon churn.
+        AppLog.debug("reload rebuild", [
+            "items": items.count,
+            "keys": items.map(\.orderKey).joined(separator: ",")
+        ])
         tasksContainer.subviews.forEach { $0.removeFromSuperview() }
 
         let height = bounds.height > 0 ? bounds.height : TaskbarSettings.shared.barHeight
@@ -162,7 +172,8 @@ final class TaskbarContentView: NSView {
                     HideManager.toggleHidden(bundleID: info.bundleID)
                 }
                 button.onQuit = { info in
-                    NSRunningApplication(processIdentifier: info.pid)?.terminate()
+                    let ok = NSRunningApplication(processIdentifier: info.pid)?.terminate() ?? false
+                    AppLog.info("quit app requested", ["app": info.appName, "pid": info.pid, "accepted": ok])
                 }
                 button.onNewWindow = { info in
                     if let bid = info.bundleID {
@@ -266,6 +277,7 @@ final class TaskbarContentView: NSView {
 
         // Persist order; one notification refreshes every taskbar screen.
         // Pinned IDs are written directly so Start Menu picks them up next open.
+        AppLog.info("taskbarOrder persisted", ["count": order.count, "order": order.joined(separator: ",")])
         UserDefaults.standard.set(order, forKey: "taskbarOrder")
         NotificationCenter.default.post(name: .taskbarOrderChanged, object: nil)
     }

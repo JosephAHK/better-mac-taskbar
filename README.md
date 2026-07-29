@@ -56,6 +56,7 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Automatically hide the taskbar
 - Start menu hotkey (click to record; Reset restores ⌘ / Windows key)
 - Launch at login
+- Verbose logging (see [Logs](#logs))
 
 ## Project layout
 
@@ -74,7 +75,26 @@ Runtime diagnostics are written to:
 ~/Library/Logs/BetterMacTaskbar/app.log
 ```
 
-Useful when the app disappears after a rebuild (`pkill` + relaunch) or exits unexpectedly.
+Rotates at 4 MB, keeping `app.1.log` and `app.2.log`.
+
+`INFO` and above is always logged: window activations, minimize/close and which
+fallback path actually worked, hotkey and tray clicks, settings changes, Dock
+mode changes, and every AppleScript / Accessibility failure.
+
+`DEBUG` is off by default because the window poll runs about three times a
+second. Turn it on in **Settings → Verbose logging** (or launch with
+`BMT_VERBOSE_LOG=1`) to also get window enumeration results, drop reasons for
+windows that never became icons, window-id remaps, and timings for slow AX /
+AppleScript calls.
+
+### Reporting a problem
+
+1. Enable **Settings → Verbose logging**.
+2. Reproduce the problem.
+3. Menu bar icon → **Copy Diagnostics** — puts app state (permissions,
+   settings, current windows) plus the last 200 log lines on the clipboard.
+
+**Reveal Log in Finder** in the same menu opens the full log.
 
 ## License
 

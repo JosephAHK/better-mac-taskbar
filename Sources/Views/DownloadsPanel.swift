@@ -116,7 +116,11 @@ final class DownloadsPanelController {
     private func show(relativeTo view: NSView) {
         TrashPanelController.shared.hide()
         hide()
-        guard let window = view.window else { return }
+        guard let window = view.window else {
+            AppLog.warn("DownloadsPanel.show aborted, anchor has no window")
+            return
+        }
+        AppLog.info("DownloadsPanel.show")
 
         let width: CGFloat = 340
         let height: CGFloat = 420
@@ -462,8 +466,14 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
             try FileManager.default.trashItem(at: entry.url, resultingItemURL: &resultingItemURL)
             if let trashedURL = resultingItemURL as URL? {
                 TrashOriginStore.record(trashedURL: trashedURL, originalURL: entry.url)
+                AppLog.info("download trashed", ["name": entry.url.lastPathComponent])
+            } else {
+                // No resulting URL means Restore later can't find the origin.
+                AppLog.warn("download trashed without resulting URL", ["path": entry.url.path])
             }
-        } catch {}
+        } catch {
+            AppLog.warn("trashItem failed", ["path": entry.url.path, "error": error.localizedDescription])
+        }
         reloadFromDisk()
     }
 
@@ -476,11 +486,17 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         let url = currentURL
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .nameKey]
-        let files = (try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        let files: [URL]
+        do {
+            files = try fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            AppLog.warn("downloads listing failed", ["path": url.path, "error": error.localizedDescription])
+            files = []
+        }
 
         let entries = files.map { fileURL in
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
@@ -558,7 +574,11 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         stopWatching()
         let path = currentURL.path
         folderFD = open(path, O_EVTONLY)
-        guard folderFD >= 0 else { return }
+        guard folderFD >= 0 else {
+            // Without this fd the list only refreshes on reopen.
+            AppLog.warn("downloads watcher open failed", ["path": path, "errno": errno])
+            return
+        }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: folderFD,
             eventMask: [.write, .rename, .delete, .extend, .attrib],

@@ -40,12 +40,14 @@ final class TrayView: NSView {
         downloadsButton.translatesAutoresizingMaskIntoConstraints = false
         downloadsButton.onToggle = { [weak self] in
             guard let self else { return }
+            AppLog.info("tray click", ["target": "downloads"])
             DownloadsPanelController.shared.toggle(relativeTo: self.downloadsButton)
         }
 
         trashButton.translatesAutoresizingMaskIntoConstraints = false
         trashButton.onToggle = { [weak self] in
             guard let self else { return }
+            AppLog.info("tray click", ["target": "trash"])
             TrashPanelController.shared.toggle(relativeTo: self.trashButton)
         }
 
@@ -79,6 +81,7 @@ final class TrayView: NSView {
         ])
 
         showDesktop.onClick = { [weak self] in
+            AppLog.info("tray click", ["target": "showDesktop"])
             self?.onShowDesktop?()
         }
         showDesktop.translatesAutoresizingMaskIntoConstraints = false
@@ -136,8 +139,12 @@ final class TrayView: NSView {
     }
 
     @objc private func openDateTime() {
+        AppLog.info("tray click", ["target": "clock"])
         if let url = URL(string: "x-apple.systempreferences:com.apple.Date-Time-Settings.extension") {
-            NSWorkspace.shared.open(url)
+            let opened = NSWorkspace.shared.open(url)
+            if !opened {
+                AppLog.warn("failed to open Date & Time settings")
+            }
         }
     }
 }

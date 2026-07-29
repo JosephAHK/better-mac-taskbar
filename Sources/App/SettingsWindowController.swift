@@ -5,7 +5,8 @@ final class SettingsWindowController: NSWindowController {
 
     private init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
+            // Height grew by one checkbox row when "Verbose logging" was added.
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 576),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -26,6 +27,7 @@ final class SettingsWindowController: NSWindowController {
         if let view = window?.contentView as? SettingsView {
             view.reloadHiddenList()
             view.reloadHotkeyDisplay()
+            view.reloadVerboseState()
         }
     }
 }
@@ -35,6 +37,7 @@ final class SettingsView: NSView {
     private let dockCheckbox = NSButton(checkboxWithTitle: "Hide Dock (use taskbar instead)", target: nil, action: nil)
     private let autoHideCheckbox = NSButton(checkboxWithTitle: "Automatically hide the taskbar", target: nil, action: nil)
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
+    private let verboseLogCheckbox = NSButton(checkboxWithTitle: "Verbose logging (for bug reports)", target: nil, action: nil)
     private let hotkeyLabel = NSTextField(labelWithString: "Start menu hotkey")
     private let hotkeyButton = NSButton(title: "", target: nil, action: nil)
     private let hotkeyResetButton = NSButton(title: "Reset", target: nil, action: nil)
@@ -87,15 +90,23 @@ final class SettingsView: NSView {
         launchAtLoginCheckbox.autoresizingMask = [.minYMargin]
         addSubview(launchAtLoginCheckbox)
 
+        verboseLogCheckbox.state = AppLog.isVerbose ? .on : .off
+        verboseLogCheckbox.target = self
+        verboseLogCheckbox.action = #selector(verboseLogChanged)
+        verboseLogCheckbox.frame = NSRect(x: 24, y: frameRect.height - 244, width: 340, height: 24)
+        verboseLogCheckbox.autoresizingMask = [.minYMargin]
+        verboseLogCheckbox.toolTip = "Writes detailed diagnostics to ~/Library/Logs/BetterMacTaskbar/app.log"
+        addSubview(verboseLogCheckbox)
+
         hotkeyLabel.font = NSFont.systemFont(ofSize: 13)
-        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 250, width: 140, height: 24)
+        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 286, width: 140, height: 24)
         hotkeyLabel.autoresizingMask = [.minYMargin]
         addSubview(hotkeyLabel)
 
         hotkeyButton.bezelStyle = .rounded
         hotkeyButton.target = self
         hotkeyButton.action = #selector(beginHotkeyRecording)
-        hotkeyButton.frame = NSRect(x: 170, y: frameRect.height - 252, width: 150, height: 28)
+        hotkeyButton.frame = NSRect(x: 170, y: frameRect.height - 288, width: 150, height: 28)
         hotkeyButton.autoresizingMask = [.minYMargin]
         hotkeyButton.toolTip = "Click, then press the shortcut you want for Start"
         addSubview(hotkeyButton)
@@ -103,19 +114,19 @@ final class SettingsView: NSView {
         hotkeyResetButton.bezelStyle = .rounded
         hotkeyResetButton.target = self
         hotkeyResetButton.action = #selector(resetHotkey)
-        hotkeyResetButton.frame = NSRect(x: 328, y: frameRect.height - 252, width: 68, height: 28)
+        hotkeyResetButton.frame = NSRect(x: 328, y: frameRect.height - 288, width: 68, height: 28)
         hotkeyResetButton.autoresizingMask = [.minYMargin]
         hotkeyResetButton.toolTip = "Reset to ⌘ / Windows key"
         addSubview(hotkeyResetButton)
 
         hiddenSectionLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 300, width: 300, height: 20)
+        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 336, width: 300, height: 20)
         hiddenSectionLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenSectionLabel)
 
         hiddenEmptyLabel.font = NSFont.systemFont(ofSize: 12)
         hiddenEmptyLabel.textColor = .secondaryLabelColor
-        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 324, width: 370, height: 18)
+        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 360, width: 370, height: 18)
         hiddenEmptyLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenEmptyLabel)
 
@@ -141,7 +152,7 @@ final class SettingsView: NSView {
         hiddenScroll.borderType = .bezelBorder
         hiddenScroll.drawsBackground = true
         hiddenScroll.backgroundColor = NSColor.controlBackgroundColor
-        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 440)
+        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 476)
         hiddenScroll.autoresizingMask = [.width, .height]
         addSubview(hiddenScroll)
 
@@ -166,6 +177,11 @@ final class SettingsView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Verbose can also be flipped by BMT_VERBOSE_LOG, so re-read on show.
+    func reloadVerboseState() {
+        verboseLogCheckbox.state = AppLog.isVerbose ? .on : .off
+    }
 
     @objc func reloadHotkeyDisplay() {
         guard !isRecordingHotkey else { return }
@@ -243,10 +259,12 @@ final class SettingsView: NSView {
 
     @objc private func centerChanged() {
         TaskbarSettings.shared.centerIcons = centerCheckbox.state == .on
+        AppLog.info("setting changed", ["key": "centerIcons", "value": centerCheckbox.state == .on])
     }
 
     @objc private func dockChanged() {
         TaskbarSettings.shared.replaceDock = dockCheckbox.state == .on
+        AppLog.info("setting changed", ["key": "replaceDock", "value": dockCheckbox.state == .on])
         if TaskbarSettings.shared.replaceDock {
             DockManager.enableReplaceMode()
         } else {
@@ -256,13 +274,19 @@ final class SettingsView: NSView {
 
     @objc private func autoHideChanged() {
         TaskbarSettings.shared.autoHideTaskbar = autoHideCheckbox.state == .on
+        AppLog.info("setting changed", ["key": "autoHideTaskbar", "value": autoHideCheckbox.state == .on])
     }
 
     @objc private func launchAtLoginChanged() {
         let want = launchAtLoginCheckbox.state == .on
         if !LaunchAtLogin.setEnabled(want) {
+            AppLog.warn("launchAtLogin toggle rejected", ["wanted": want, "actual": LaunchAtLogin.isEnabled])
             launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
         }
+    }
+
+    @objc private func verboseLogChanged() {
+        AppLog.setVerbose(verboseLogCheckbox.state == .on)
     }
 
     @objc private func resetHotkey() {

@@ -79,6 +79,11 @@ final class TaskbarPanelController {
         }
 
         let opening = target.map { !$0.isStartMenuVisible } ?? true
+        AppLog.info("toggleStartMenu", [
+            "opening": opening,
+            "hasTargetScreen": targetID != nil,
+            "contentViews": contentViews.count
+        ])
         if opening {
             cancelHideTimer()
             revealAll(animated: false)
@@ -96,6 +101,11 @@ final class TaskbarPanelController {
 
     private func rebuild() {
         hide()
+        AppLog.info("TaskbarPanel.rebuild", [
+            "screens": NSScreen.screens.count,
+            "barHeight": Int(TaskbarSettings.shared.barHeight),
+            "autoHide": TaskbarSettings.shared.autoHideTaskbar
+        ])
         for screen in NSScreen.screens {
             let panel = makePanel(for: screen)
             let id = ObjectIdentifier(screen)
@@ -107,6 +117,10 @@ final class TaskbarPanelController {
     }
 
     private func applyAutoHideMode() {
+        AppLog.debug("applyAutoHideMode", [
+            "autoHide": TaskbarSettings.shared.autoHideTaskbar,
+            "panels": panels.count
+        ])
         if TaskbarSettings.shared.autoHideTaskbar {
             startMouseMonitoring()
             for id in panels.keys {
@@ -282,6 +296,12 @@ final class TaskbarPanelController {
         } else {
             revealedIDs.remove(id)
         }
+        // Auto-hide flapping shows up here as alternating reveal/hide lines.
+        AppLog.debug("taskbar reveal", [
+            "revealed": revealed,
+            "animated": animated,
+            "keepVisible": keepVisibleCount
+        ])
 
         let height = TaskbarSettings.shared.barHeight
         let screen = entry.screen

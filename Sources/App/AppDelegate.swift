@@ -73,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Refresh Windows", action: #selector(refreshWindows), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Grant Accessibility…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Reveal Log in Finder", action: #selector(revealLog), keyEquivalent: ""))
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Better Mac Taskbar", action: #selector(quit), keyEquivalent: "q"))
         for item in menu.items {
             item.target = self
@@ -113,6 +116,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             }
         }
+    }
+
+    /// One-paste bug report: app state + the tail of the log on the clipboard.
+    @objc private func copyDiagnostics() {
+        let windows = WindowManager.shared.windows
+        let report = AppLog.diagnosticsReport(state: [
+            "accessibilityTrusted": AccessibilityService.isTrusted(prompt: false),
+            "windowCount": windows.count,
+            "apps": Set(windows.map(\.appName)).sorted().joined(separator: ","),
+            "activeWindowID": windows.first(where: \.isActive)?.id ?? "-",
+            "replaceDock": TaskbarSettings.shared.replaceDock,
+            "autoHideTaskbar": TaskbarSettings.shared.autoHideTaskbar,
+            "centerIcons": TaskbarSettings.shared.centerIcons,
+            "launchAtLogin": LaunchAtLogin.isEnabled,
+            "startMenuHotkey": TaskbarSettings.shared.startMenuHotkey.displayString,
+            "hiddenApps": TaskbarSettings.shared.hiddenBundleIDs.joined(separator: ",")
+        ])
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        AppLog.info("diagnostics copied", ["bytes": report.utf8.count, "verbose": AppLog.isVerbose])
+    }
+
+    @objc private func revealLog() {
+        NSWorkspace.shared.selectFile(AppLog.fileURL.path, inFileViewerRootedAtPath: AppLog.directoryURL.path)
     }
 
     @objc private func quit() {

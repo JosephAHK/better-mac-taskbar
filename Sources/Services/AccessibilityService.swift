@@ -13,8 +13,29 @@ enum AccessibilityService {
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
-        guard result == .success, let array = value as? [AXUIElement] else { return [] }
-        return array.filter { isStandardWindow($0) }
+        guard result == .success, let array = value as? [AXUIElement] else {
+            // .cannotComplete (-25204) usually means the app is busy/unresponsive;
+            // .apiDisabled (-25211) means the Accessibility grant is gone.
+            if result != .success, result != .noValue, result != .attributeUnsupported {
+                AppLog.throttled("axWindows-\(pid)-\(result.rawValue)", seconds: 20, level: .warn,
+                                 "AXWindows failed", [
+                    "pid": pid,
+                    "app": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?",
+                    "status": result.rawValue
+                ])
+            }
+            return []
+        }
+        let standard = array.filter { isStandardWindow($0) }
+        if standard.count != array.count {
+            AppLog.throttled("axNonStandard-\(pid)", seconds: 30, "AX windows filtered", [
+                "pid": pid,
+                "app": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?",
+                "total": array.count,
+                "standard": standard.count
+            ])
+        }
+        return standard
     }
 
     static func isStandardWindow(_ element: AXUIElement) -> Bool {
@@ -79,6 +100,7 @@ enum AccessibilityService {
 
     static func raise(_ element: AXUIElement, pid: pid_t) {
         guard let app = NSRunningApplication(processIdentifier: pid) else {
+            AppLog.warn("ax raise without running app", ["pid": pid])
             deminimize(element)
             AXUIElementPerformAction(element, kAXRaiseAction as CFString)
             return
@@ -89,17 +111,34 @@ enum AccessibilityService {
         AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         // Single raise — retrying AXRaise animates the window up the z-order one step at a time.
-        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        _ = app.activate(options: [.activateIgnoringOtherApps])
+        let raiseStatus = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+        let activated = app.activate(options: [.activateIgnoringOtherApps])
+        AppLog.debug("ax raise", [
+            "pid": pid,
+            "app": app.localizedName ?? "?",
+            "raiseStatus": raiseStatus.rawValue,
+            "activated": activated
+        ])
 
         // If still miniaturized, only retry deminimize (no extra AXRaise).
         if isMinimized(element) {
+            var attempts = 0
             for _ in 0..<8 {
+                attempts += 1
                 deminimize(element)
                 if !isMinimized(element) { break }
                 Thread.sleep(forTimeInterval: 0.03)
             }
-            if !isMinimized(element) {
+            let stuck = isMinimized(element)
+            if stuck {
+                // Window refuses to deminimize via AX — caller's script fallback matters here.
+                AppLog.warn("ax deminimize stuck", [
+                    "pid": pid,
+                    "app": app.localizedName ?? "?",
+                    "attempts": attempts
+                ])
+            } else {
+                AppLog.debug("ax deminimize retried", ["app": app.localizedName ?? "?", "attempts": attempts])
                 AXUIElementPerformAction(element, kAXRaiseAction as CFString)
             }
         }
@@ -242,10 +281,31 @@ enum AccessibilityService {
         end if
         """
         var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
+        guard let script = NSAppleScript(source: source) else {
+            AppLog.error("raiseScriptedWindow compile failed", ["app": appName])
+            return false
+        }
+        let result = AppLog.measure("raiseScript", warnAfter: 0.5, ["app": appName]) {
+            script.executeAndReturnError(&error)
+        }
         let value = result.stringValue ?? ""
-        return error == nil && value == "ok"
+        if let error {
+            AppLog.warn("raiseScriptedWindow error", [
+                "app": appName,
+                "title": title,
+                "errNum": error[NSAppleScript.errorNumber] as? Int ?? 0,
+                "errMsg": error[NSAppleScript.errorMessage] as? String ?? "\(error)"
+            ])
+            return false
+        }
+        if value != "ok" {
+            AppLog.warn("raiseScriptedWindow no window restored", [
+                "app": appName,
+                "title": title,
+                "value": value
+            ])
+        }
+        return value == "ok"
     }
 
     /// Activate / unhide an app when AX and AppleScript deminimize are unavailable.
@@ -253,16 +313,34 @@ enum AccessibilityService {
     static func forceShowApp(pid: pid_t, bundleID: String?) {
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.unhide()
-            _ = app.activate(options: [.activateIgnoringOtherApps])
+            let activated = app.activate(options: [.activateIgnoringOtherApps])
+            AppLog.debug("forceShowApp activate", [
+                "pid": pid,
+                "app": app.localizedName ?? "?",
+                "activated": activated
+            ])
             return
         }
         guard let bundleID,
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            AppLog.warn("forceShowApp gave up", [
+                "pid": pid,
+                "bundleID": bundleID ?? "-",
+                "reason": bundleID == nil ? "noBundleID" : "noAppURL"
+            ])
             return
         }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
-        NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
+        AppLog.info("forceShowApp launching", ["bundleID": bundleID])
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            if let error {
+                AppLog.warn("forceShowApp launch failed", [
+                    "bundleID": bundleID,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
     }
 
     /// Front-to-back window titles from the app's scripting interface.
@@ -284,8 +362,19 @@ enum AccessibilityService {
         """
         var error: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return [] }
-        let result = script.executeAndReturnError(&error)
-        guard error == nil else { return [] }
+        let result = AppLog.measure("scriptedWindowTitles", warnAfter: 0.4, ["bundleID": bundleID]) {
+            script.executeAndReturnError(&error)
+        }
+        if let error {
+            // errNum -1743 = Automation permission not granted for this target.
+            AppLog.throttled("titlesErr-\(bundleID)", seconds: 30, level: .warn,
+                             "scriptedWindowTitles error", [
+                "bundleID": bundleID,
+                "errNum": error[NSAppleScript.errorNumber] as? Int ?? 0,
+                "errMsg": error[NSAppleScript.errorMessage] as? String ?? "\(error)"
+            ])
+            return []
+        }
 
         var titles: [String] = []
         let count = result.numberOfItems
@@ -421,7 +510,9 @@ enum AccessibilityService {
         """
         var error: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return "err:no-script" }
-        let result = script.executeAndReturnError(&error)
+        let result = AppLog.measure("minimizeScript", warnAfter: 0.5, ["app": appName]) {
+            script.executeAndReturnError(&error)
+        }
         if let error {
             let msg = error[NSAppleScript.errorMessage] as? String ?? "\(error)"
             let num = error[NSAppleScript.errorNumber] as? Int ?? 0
@@ -458,9 +549,19 @@ enum AccessibilityService {
         """
         var error: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
+        let result = AppLog.measure("minimizeViaMenu", warnAfter: 0.5, ["app": appName]) {
+            script.executeAndReturnError(&error)
+        }
         let value = result.stringValue ?? ""
-        return error == nil && value.hasPrefix("ok")
+        let ok = error == nil && value.hasPrefix("ok")
+        if !ok {
+            AppLog.warn("minimizeViaMenu failed", [
+                "app": appName,
+                "value": value,
+                "errNum": error?[NSAppleScript.errorNumber] as? Int ?? 0
+            ])
+        }
+        return ok
     }
 
     /// Synthetic ⌘M — only delivered when this process has Accessibility (or equivalent Input Monitoring).
@@ -482,9 +583,18 @@ enum AccessibilityService {
         }
         if !title.isEmpty {
             if let match = axWindows.first(where: { self.title(of: $0) == title }) {
+                AppLog.debug("resolveWindow via title", ["pid": pid, "title": title])
                 return match
             }
         }
+        // Falling back to the first window is how the *wrong* window gets raised
+        // when an app has several — worth seeing in the log.
+        AppLog.debug("resolveWindow fallback", [
+            "pid": pid,
+            "title": title,
+            "axWindows": axWindows.count,
+            "strategy": axWindows.isEmpty ? "none" : "firstWindow"
+        ])
         return axWindows.first
     }
 
@@ -493,9 +603,11 @@ enum AccessibilityService {
         var closeButton: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &closeButton)
         if result == .success, let button = closeButton {
-            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            let press = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            AppLog.debug("ax close button pressed", ["pid": pid ?? -1, "status": press.rawValue])
             return
         }
+        AppLog.debug("ax close falling back to cmdW", ["pid": pid ?? -1, "status": result.rawValue])
         // Fallback: focus the window then send Cmd+W (closes window, does not quit).
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         if let pid, let app = NSRunningApplication(processIdentifier: pid) {
@@ -571,9 +683,23 @@ enum AccessibilityService {
         """
         var error: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
+        let result = AppLog.measure("closeScript", warnAfter: 0.5, ["app": appName]) {
+            script.executeAndReturnError(&error)
+        }
         let value = result.stringValue ?? ""
-        return error == nil && value == "ok"
+        if let error {
+            AppLog.warn("closeScriptedWindow error", [
+                "app": appName,
+                "title": title,
+                "errNum": error[NSAppleScript.errorNumber] as? Int ?? 0,
+                "errMsg": error[NSAppleScript.errorMessage] as? String ?? "\(error)"
+            ])
+            return false
+        }
+        if value != "ok" {
+            AppLog.warn("closeScriptedWindow no window closed", ["app": appName, "title": title, "value": value])
+        }
+        return value == "ok"
     }
 
     /// Synthetic ⌘W — closes the front window of the active app without quitting.
@@ -590,7 +716,8 @@ enum AccessibilityService {
     /// Windows-style Show Desktop via Dock's Mission Control notification.
     /// AppKit hide() / hideOtherApplications fail from an accessory (LSUIElement) app.
     static func toggleShowDesktop() {
-        _ = postShowDesktopNotification()
+        let ok = postShowDesktopNotification()
+        AppLog.info("showDesktop", ["ok": ok])
     }
 
     /// Back-compat name used by older call sites.
@@ -606,9 +733,16 @@ enum AccessibilityService {
             "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
         ]
         for path in paths {
-            guard let handle = dlopen(path, RTLD_LAZY) else { continue }
+            guard let handle = dlopen(path, RTLD_LAZY) else {
+                let reason = dlerror().map { String(cString: $0) } ?? "unknown"
+                AppLog.debug("dlopen failed", ["path": path, "error": reason])
+                continue
+            }
             defer { dlclose(handle) }
-            guard let sym = dlsym(handle, "CoreDockSendNotification") else { continue }
+            guard let sym = dlsym(handle, "CoreDockSendNotification") else {
+                AppLog.debug("dlsym CoreDockSendNotification missing", ["path": path])
+                continue
+            }
             typealias CoreDockFn = @convention(c) (CFString, Int32) -> Void
             let fn = unsafeBitCast(sym, to: CoreDockFn.self)
             fn("com.apple.showdesktop.awake" as CFString, 0)

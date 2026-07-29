@@ -17,19 +17,38 @@ enum TrashOriginStore {
 
     private static func load() -> [String: String] {
         if let cache { return cache }
-        guard let data = try? Data(contentsOf: storeURL),
-              let map = try? JSONDecoder().decode([String: String].self, from: data) else {
+        guard FileManager.default.fileExists(atPath: storeURL.path) else {
             cache = [:]
             return [:]
         }
-        cache = map
-        return map
+        do {
+            let data = try Data(contentsOf: storeURL)
+            let map = try JSONDecoder().decode([String: String].self, from: data)
+            cache = map
+            return map
+        } catch {
+            // A corrupt store silently disables Restore — worth a log line.
+            AppLog.warn("trash origin store load failed", [
+                "path": storeURL.path,
+                "error": error.localizedDescription
+            ])
+            cache = [:]
+            return [:]
+        }
     }
 
     private static func save(_ map: [String: String]) {
         cache = map
-        guard let data = try? JSONEncoder().encode(map) else { return }
-        try? data.write(to: storeURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(map)
+            try data.write(to: storeURL, options: .atomic)
+        } catch {
+            AppLog.warn("trash origin store save failed", [
+                "path": storeURL.path,
+                "entries": map.count,
+                "error": error.localizedDescription
+            ])
+        }
     }
 
     static func record(trashedURL: URL, originalURL: URL) {

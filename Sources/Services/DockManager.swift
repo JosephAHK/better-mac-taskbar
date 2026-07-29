@@ -99,19 +99,44 @@ enum DockManager {
 
     private static func runDefaults(_ args: [String]) {
         let process = Process()
+        let errPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
         process.arguments = args
-        process.standardError = Pipe()
-        try? process.run()
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            AppLog.warn("defaults launch failed", [
+                "args": args.joined(separator: " "),
+                "error": error.localizedDescription
+            ])
+            return
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            // `delete` of an unset key exits nonzero — harmless, but worth seeing.
+            AppLog.warn("defaults failed", [
+                "args": args.joined(separator: " "),
+                "status": process.terminationStatus,
+                "stderr": String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            ])
+        }
     }
 
     private static func restartDock() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         process.arguments = ["Dock"]
-        try? process.run()
+        do {
+            try process.run()
+        } catch {
+            AppLog.warn("killall Dock launch failed", ["error": error.localizedDescription])
+            return
+        }
         process.waitUntilExit()
+        AppLog.info("Dock restarted", ["status": process.terminationStatus])
     }
 }
 
@@ -129,12 +154,21 @@ enum PinManager {
     static func togglePin(bundleID: String?) {
         guard let bundleID else { return }
         TaskbarSettings.shared.togglePin(bundleID)
+        AppLog.info("pin toggled", ["bundleID": bundleID, "pinned": TaskbarSettings.shared.isPinned(bundleID)])
     }
 
     static func launch(bundleID: String) {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            AppLog.warn("launch failed, no app URL", ["bundleID": bundleID])
+            return
+        }
+        AppLog.info("launch app", ["bundleID": bundleID])
         let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: url, configuration: config)
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            if let error {
+                AppLog.warn("launch failed", ["bundleID": bundleID, "error": error.localizedDescription])
+            }
+        }
     }
 
     static func icon(forBundleID bundleID: String) -> NSImage? {
@@ -161,9 +195,11 @@ enum HideManager {
     static func toggleHidden(bundleID: String?) {
         guard let bundleID else { return }
         TaskbarSettings.shared.toggleHidden(bundleID)
+        AppLog.info("hide toggled", ["bundleID": bundleID, "hidden": TaskbarSettings.shared.isHidden(bundleID)])
     }
 
     static func removeHidden(bundleID: String) {
         TaskbarSettings.shared.removeHidden(bundleID)
+        AppLog.info("hide removed", ["bundleID": bundleID])
     }
 }

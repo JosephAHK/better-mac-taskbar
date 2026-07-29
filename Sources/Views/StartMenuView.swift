@@ -112,6 +112,7 @@ final class StartMenuController {
     }
 
     private func show(relativeTo view: NSView) {
+        AppLog.info("StartMenu.show")
         DownloadsPanelController.shared.hide()
         TrashPanelController.shared.hide()
         // Unhide before measuring the Start button so the menu anchors on-screen
@@ -125,6 +126,7 @@ final class StartMenuController {
         let height: CGFloat = 420
         let content = StartMenuView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         content.onLaunch = { [weak self] bundleID in
+            AppLog.info("startMenu launch", ["bundleID": bundleID])
             PinManager.launch(bundleID: bundleID)
             self?.hide()
         }
@@ -242,7 +244,8 @@ fileprivate enum AppCatalog {
         if let cached, let cacheDate, Date().timeIntervalSince(cacheDate) < cacheTTL {
             return cached
         }
-        let apps = scanInstalledApps()
+        let apps = AppLog.measure("scanInstalledApps", warnAfter: 0.5) { scanInstalledApps() }
+        AppLog.debug("app catalog scanned", ["apps": apps.count])
         cached = apps
         cacheDate = Date()
         return apps
@@ -617,9 +620,15 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         titleLabel.stringValue = "APPS"
 
         let lowered = trimmed.lowercased()
-        let matches = AppCatalog.allApps().filter { app in
+        let all = AppCatalog.allApps()
+        let matches = all.filter { app in
             app.name.lowercased().contains(lowered) || app.bundleID.lowercased().contains(lowered)
         }
+        AppLog.debug("startMenu search", [
+            "queryLength": trimmed.count,
+            "catalog": all.count,
+            "matches": matches.count
+        ])
         rebuildRows(apps: matches.map { ($0.bundleID, $0.name) }, allowSelection: true)
     }
 

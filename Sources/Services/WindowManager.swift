@@ -24,6 +24,8 @@ final class WindowManager {
     private let scriptedTitleCacheTTL: TimeInterval = 0.35
     /// Backup poll — AX observers handle most window create/close events instantly.
     private let pollInterval: TimeInterval = 0.35
+    /// Only for logging: notice when the Accessibility grant appears/disappears.
+    private var lastTrustedState: Bool?
 
     private init() {}
 
@@ -36,6 +38,10 @@ final class WindowManager {
     private func reclaimFrontIfStolen(for info: WindowInfo) {
         let selfPID = ProcessInfo.processInfo.processIdentifier
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == selfPID else { return }
+        AppLog.warn("focus stolen by taskbar, reclaiming", [
+            "app": info.appName,
+            "id": info.id
+        ])
         AccessibilityService.forceShowApp(pid: info.pid, bundleID: info.bundleID)
     }
 
@@ -92,6 +98,14 @@ final class WindowManager {
     /// Focus a specific window. Uses AX when available; otherwise AppleScript by
     /// window title (CG z-order indices do not track Chrome's real front window).
     func activateWindow(_ info: WindowInfo) {
+        AppLog.info("activateWindow", [
+            "id": info.id,
+            "app": info.appName,
+            "title": info.title,
+            "minimized": info.isMinimized,
+            "onScreen": info.isOnScreen,
+            "hasAX": info.axElement != nil
+        ])
         noteActivated(id: info.id)
         // Block Chrome title AppleScript during grace — it activates this app and flashes.
         suppressScriptedTitlesUntil = Date().addingTimeInterval(activationGrace + 0.4)
@@ -99,7 +113,9 @@ final class WindowManager {
         // Raise off the main thread so the blue underline can paint immediately.
         let payload = info
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            self?.raiseWindow(payload)
+            AppLog.measure("raiseWindow", warnAfter: 0.6, ["app": payload.appName]) {
+                self?.raiseWindow(payload)
+            }
             self?.reclaimFrontIfStolen(for: payload)
             DispatchQueue.main.async {
                 self?.refresh()
@@ -114,6 +130,13 @@ final class WindowManager {
         // Fast path from strip state — avoid synchronous AX probes on the click.
         let isTaskbarActive = info.isActive || lastActivatedWindowID == info.id
         let willMinimize = !info.isMinimized && isTaskbarActive
+        AppLog.info("taskbarClick", [
+            "id": info.id,
+            "app": info.appName,
+            "decision": info.isMinimized ? "restore" : (willMinimize ? "minimize" : "activate"),
+            "wasActive": info.isActive,
+            "lastActivated": lastActivatedWindowID ?? "-"
+        ])
         if info.isMinimized {
             activateWindow(info)
         } else if willMinimize {
@@ -149,6 +172,13 @@ final class WindowManager {
             NotificationCenter.default.post(name: .windowsUpdated, object: nil)
         }
 
+        AppLog.info("minimizeWindow", [
+            "id": info.id,
+            "app": info.appName,
+            "title": info.title,
+            "hasAX": info.axElement != nil
+        ])
+
         let payload = info
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             let axTrusted = AccessibilityService.isTrusted(prompt: false)
@@ -158,6 +188,8 @@ final class WindowManager {
                 cached: payload.axElement
             )
             var minimized = false
+            /// Which fallback actually did the work — the key detail when minimize misbehaves.
+            var via = "none"
 
             if let ax {
                 AccessibilityService.minimize(ax)
@@ -166,6 +198,7 @@ final class WindowManager {
                     AccessibilityService.minimize(ax)
                     minimized = AccessibilityService.isMinimized(ax)
                 }
+                if minimized { via = "ax" }
             }
 
             // Never activate() while minimizing — that flashes the window to front
@@ -177,12 +210,29 @@ final class WindowManager {
                     title: payload.title
                 )
                 minimized = scriptStatus.hasPrefix("ok")
+                if minimized {
+                    via = "script:\(scriptStatus)"
+                } else {
+                    AppLog.warn("minimize script failed", [
+                        "app": payload.appName,
+                        "title": payload.title,
+                        "status": scriptStatus
+                    ])
+                }
             }
 
             // Hide is the reliable no-flash path without AX (and a good AX fallback).
             if !minimized {
                 _ = NSRunningApplication(processIdentifier: payload.pid)?.hide()
+                via = "appHide"
             }
+
+            AppLog.info("minimizeWindow result", [
+                "app": payload.appName,
+                "via": via,
+                "axResolved": ax != nil,
+                "axTrusted": axTrusted
+            ])
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 self?.refresh()
@@ -192,6 +242,11 @@ final class WindowManager {
 
     /// Close one window without quitting the app. AX close button → AppleScript → ⌘W.
     func closeWindow(_ info: WindowInfo) {
+        AppLog.info("closeWindow", [
+            "id": info.id,
+            "app": info.appName,
+            "title": info.title
+        ])
         let payload = info
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             let ax = AccessibilityService.resolveWindow(
@@ -200,6 +255,7 @@ final class WindowManager {
                 cached: payload.axElement
             )
             if let ax {
+                AppLog.debug("closeWindow via ax", ["app": payload.appName])
                 AccessibilityService.close(ax, pid: payload.pid)
             } else if !payload.title.isEmpty {
                 let ok = AccessibilityService.closeScriptedWindow(
@@ -207,12 +263,14 @@ final class WindowManager {
                     appName: payload.appName,
                     title: payload.title
                 )
+                AppLog.info("closeWindow via script", ["app": payload.appName, "ok": ok])
                 if !ok {
                     NSRunningApplication(processIdentifier: payload.pid)?
                         .activate(options: [.activateIgnoringOtherApps])
                     AccessibilityService.postCommandW()
                 }
             } else {
+                AppLog.info("closeWindow via cmdW", ["app": payload.appName, "reason": "noAXNoTitle"])
                 NSRunningApplication(processIdentifier: payload.pid)?
                     .activate(options: [.activateIgnoringOtherApps])
                 AccessibilityService.postCommandW()
@@ -243,8 +301,10 @@ final class WindowManager {
 
     private func ensureFrontmostViaLaunchServices(bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            AppLog.warn("launchServices reopen skipped, no app URL", ["bundleID": bundleID])
             return
         }
+        AppLog.debug("launchServices reopen", ["bundleID": bundleID])
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
@@ -260,6 +320,13 @@ final class WindowManager {
         let axWindows = AccessibilityService.windows(for: info.pid)
         let liveMatch = resolveAXWindow(for: info, in: axWindows)
 
+        AppLog.debug("raiseWindow begin", [
+            "app": info.appName,
+            "wasHidden": wasHidden,
+            "axWindows": axWindows.count,
+            "axMatch": liveMatch != nil
+        ])
+
         if let ax = liveMatch {
             AccessibilityService.raise(ax, pid: info.pid)
         } else {
@@ -269,16 +336,24 @@ final class WindowManager {
             // and makes Better Mac Taskbar frontmost (focus flash). Use Launch Services / forceShow below.
             let needsRestore = wasHidden || info.isMinimized || !info.title.isEmpty
             if needsRestore {
-                _ = AccessibilityService.raiseScriptedWindow(
+                let ok = AccessibilityService.raiseScriptedWindow(
                     bundleID: info.bundleID,
                     appName: info.appName,
                     title: info.title,
                     pid: info.pid
                 )
+                AppLog.info("raise via script", [
+                    "app": info.appName,
+                    "title": info.title,
+                    "ok": ok
+                ])
+            } else {
+                AppLog.debug("raise skipped script", ["app": info.appName, "reason": "noRestoreNeeded"])
             }
         }
 
         guard let bundleID = info.bundleID else {
+            AppLog.debug("raise forceShowApp", ["app": info.appName, "reason": "noBundleID"])
             AccessibilityService.forceShowApp(pid: info.pid, bundleID: nil)
             return
         }
@@ -466,17 +541,41 @@ final class WindowManager {
 
     func refresh() {
         let trusted = AccessibilityService.isTrusted(prompt: false)
+        if trusted != lastTrustedState {
+            AppLog.warn("accessibility trust changed", ["trusted": trusted])
+            lastTrustedState = trusted
+        }
+
         let enumerated: [WindowInfo]
         if trusted {
             syncAXObservers()
-            enumerated = enumerateViaAccessibility()
+            enumerated = AppLog.measure("enumerateViaAccessibility", warnAfter: 0.3) {
+                enumerateViaAccessibility()
+            }
         } else {
             removeAllAXObservers()
-            enumerated = enumerateViaCGFallback()
+            enumerated = AppLog.measure("enumerateViaCGFallback", warnAfter: 0.3) {
+                enumerateViaCGFallback()
+            }
         }
         let next = finalizeActiveFlags(stabilizeOrder(enumerated))
 
+        // Poll runs ~3×/sec, so the steady-state summary is throttled; changes always log.
+        AppLog.throttled("refresh", seconds: 5, "refresh", [
+            "trusted": trusted,
+            "source": trusted ? "ax" : "cg",
+            "windows": next.count,
+            "observers": axObservers.count,
+            "activeID": next.first(where: \.isActive)?.id ?? "-"
+        ])
+
         if next != windows {
+            AppLog.debug("windows changed", [
+                "before": windows.count,
+                "after": next.count,
+                "activeID": next.first(where: \.isActive)?.id ?? "-",
+                "apps": Set(next.map(\.appName)).sorted().joined(separator: ",")
+            ])
             windows = next
             NotificationCenter.default.post(name: .windowsUpdated, object: nil)
         }
@@ -553,7 +652,15 @@ final class WindowManager {
         }
 
         var observer: AXObserver?
-        guard AXObserverCreate(pid, callback, &observer) == .success, let observer else { return }
+        let createResult = AXObserverCreate(pid, callback, &observer)
+        guard createResult == .success, let observer else {
+            AppLog.warn("AXObserverCreate failed", [
+                "pid": pid,
+                "app": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?",
+                "status": createResult.rawValue
+            ])
+            return
+        }
 
         let app = AXUIElementCreateApplication(pid)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -566,10 +673,21 @@ final class WindowManager {
             kAXMainWindowChangedNotification
         ] as [CFString]
 
+        var rejected: [String] = []
         for name in notifications {
             let result = AXObserverAddNotification(observer, app, name, refcon)
             // Some apps reject individual notifications; keep going for the rest.
-            _ = result
+            if result != .success {
+                rejected.append("\(name)/\(result.rawValue)")
+            }
+        }
+        if !rejected.isEmpty {
+            // A rejected notification means we fall back to the 0.35s poll for that event.
+            AppLog.debug("AX notifications rejected", [
+                "pid": pid,
+                "app": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?",
+                "rejected": rejected.joined(separator: ",")
+            ])
         }
 
         CFRunLoopAddSource(
@@ -642,6 +760,12 @@ final class WindowManager {
         }
 
         if !idRemap.isEmpty {
+            // Frequent remaps mean CG/AX keep disagreeing about a window's identity —
+            // the usual cause of icons jumping or losing their underline.
+            AppLog.debug("window ids remapped", [
+                "count": idRemap.count,
+                "remap": idRemap.map { "\($0.key)->\($0.value)" }.sorted().joined(separator: ",")
+            ])
             if let last = lastActivatedWindowID, let mapped = idRemap[last] {
                 lastActivatedWindowID = mapped
             }
@@ -718,6 +842,16 @@ final class WindowManager {
                 // Skip tiny / offscreen utility that slipped through.
                 // Minimized windows can report tiny Dock frames — keep them.
                 if let frame, frame.width < 80 || frame.height < 80, !minimized {
+                    AppLog.throttled(
+                        "dropTiny-\(pid)-\(index)", seconds: 30,
+                        "window dropped: too small",
+                        [
+                            "app": app.localizedName ?? "?",
+                            "title": title,
+                            "w": Int(frame.width),
+                            "h": Int(frame.height)
+                        ]
+                    )
                     continue
                 }
 
@@ -731,6 +865,11 @@ final class WindowManager {
                     id = "\(pid)-ax-\(index)-\(title.hashValue)"
                 }
                 if usedIDs.contains(id) {
+                    AppLog.throttled(
+                        "dupID-\(id)", seconds: 30,
+                        "window dropped: duplicate id",
+                        ["app": app.localizedName ?? "?", "title": title, "id": id]
+                    )
                     continue
                 }
                 usedIDs.insert(id)
@@ -774,6 +913,16 @@ final class WindowManager {
                 detectedFrontID: detectedFrontID,
                 candidates: group.map(\.info.id)
             )
+            if detectedFrontID == nil, !group.isEmpty {
+                // Frontmost app has visible windows but none claims focus/main —
+                // this is what makes the underline land on the wrong icon.
+                AppLog.throttled("noFrontAX-\(frontmostPID)", seconds: 15, "no AX front window for frontmost app", [
+                    "pid": frontmostPID,
+                    "app": group.first?.info.appName ?? "?",
+                    "candidates": group.count,
+                    "fallbackActiveID": activeID ?? "-"
+                ])
+            }
         }
 
         return pending.map { entry in
@@ -885,27 +1034,48 @@ final class WindowManager {
                 .map(\.pid)
         )
 
+        // Tally why CG entries were dropped — "my window has no icon" bugs land here.
+        var dropped: [String: Int] = [:]
+        func drop(_ reason: String) { dropped[reason, default: 0] += 1 }
+
         for entry in cgIndex {
-            guard let app = appsByPID[entry.pid] else { continue }
+            guard let app = appsByPID[entry.pid] else {
+                drop("noRunningApp")
+                continue
+            }
             if scriptedPIDs.contains(entry.pid) { continue }
             // Electron (Claude, etc.) often omits kCGWindowIsOnscreen. Treat unknown as
             // visible when the frame looks like a real window; only skip known-offscreen.
             // If this PID already has a known on-screen window, ignore unknown-onscreen
             // surfaces (offscreen Electron buffers) so they don't become extra icons.
             if entry.onScreenKnown {
-                guard entry.isOnScreen else { continue }
+                guard entry.isOnScreen else {
+                    drop("offscreen")
+                    continue
+                }
             } else if pidsWithKnownOnscreen.contains(entry.pid) {
+                drop("unknownOnscreenWithKnownSibling")
                 continue
             } else if Self.isLikelyElectronBuffer(entry),
                       pidsWithNonBufferCandidate.contains(entry.pid) {
+                drop("electronBuffer")
                 continue
             } else {
-                guard entry.bounds.width >= 200, entry.bounds.height >= 200 else { continue }
+                guard entry.bounds.width >= 200, entry.bounds.height >= 200 else {
+                    drop("tooSmall")
+                    continue
+                }
             }
-            guard entry.bounds.width >= 200, entry.bounds.height >= 200 else { continue }
+            guard entry.bounds.width >= 200, entry.bounds.height >= 200 else {
+                drop("tooSmall")
+                continue
+            }
             // Calendar (and similar) exposes a narrow untitled inspector as its own CG
             // window — drop it when a larger sibling exists for the same PID.
-            if Self.isLikelyAuxiliaryPanel(entry, all: cgIndex) { continue }
+            if Self.isLikelyAuxiliaryPanel(entry, all: cgIndex) {
+                drop("auxiliaryPanel")
+                continue
+            }
             cgSeenPID.insert(entry.pid)
             let windowID = "\(entry.pid)-\(entry.windowID)"
             if entry.pid == frontmostPID {
@@ -1004,6 +1174,16 @@ final class WindowManager {
         // Do NOT invent ghost icons for running apps with zero windows (Chrome stays
         // alive in the background with no windows). Miniaturized windows are covered
         // by the offscreen CG pass above; pinned apps still show via orderedDisplayItems.
+
+        AppLog.throttled("cgFallback", seconds: 10, "cgFallback summary", [
+            "cgEntries": cgIndex.count,
+            "scriptedApps": scriptedPIDs.count,
+            "results": results.count,
+            "activeID": cgActiveID ?? "-",
+            "dropped": dropped.isEmpty
+                ? "-"
+                : dropped.keys.sorted().map { "\($0):\(dropped[$0]!)" }.joined(separator: ",")
+        ])
 
         return results
     }

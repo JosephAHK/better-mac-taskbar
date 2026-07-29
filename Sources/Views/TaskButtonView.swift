@@ -119,6 +119,7 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     override func otherMouseDown(with event: NSEvent) {
         // Middle-click closes (Windows behavior)
         if event.buttonNumber == 2 {
+            AppLog.info("middleClick close", ["app": windowInfo.appName, "id": windowInfo.id])
             onClose?(windowInfo)
         }
     }
@@ -177,12 +178,21 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
-    @objc private func pinToggle() { onPinToggle?(windowInfo) }
-    @objc private func hideToggle() { onHideToggle?(windowInfo) }
-    @objc private func closeWindow() { onClose?(windowInfo) }
-    @objc private func minimizeWindow() { onMinimize?(windowInfo) }
-    @objc private func newWindowAction() { onNewWindow?(windowInfo) }
-    @objc private func quitApp() { onQuit?(windowInfo) }
+    @objc private func pinToggle() { logMenuAction("pinToggle"); onPinToggle?(windowInfo) }
+    @objc private func hideToggle() { logMenuAction("hideToggle"); onHideToggle?(windowInfo) }
+    @objc private func closeWindow() { logMenuAction("close"); onClose?(windowInfo) }
+    @objc private func minimizeWindow() { logMenuAction("minimize"); onMinimize?(windowInfo) }
+    @objc private func newWindowAction() { logMenuAction("newWindow"); onNewWindow?(windowInfo) }
+    @objc private func quitApp() { logMenuAction("quit"); onQuit?(windowInfo) }
+
+    private func logMenuAction(_ action: String) {
+        AppLog.info("taskButton menu", [
+            "action": action,
+            "app": windowInfo.appName,
+            "id": windowInfo.id,
+            "bundleID": windowInfo.bundleID ?? "-"
+        ])
+    }
 
     private func truncate(_ text: String, _ max: Int) -> String {
         guard text.count > max else { return text }
@@ -259,7 +269,18 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
-    @objc private func unpin() { onUnpin?(bundleID) }
-    @objc private func hideApp() { onHide?(bundleID) }
-    @objc private func openApp() { onLaunch?(bundleID) }
+    @objc private func unpin() {
+        AppLog.info("pinnedButton menu", ["action": "unpin", "bundleID": bundleID])
+        onUnpin?(bundleID)
+    }
+
+    @objc private func hideApp() {
+        AppLog.info("pinnedButton menu", ["action": "hide", "bundleID": bundleID])
+        onHide?(bundleID)
+    }
+
+    @objc private func openApp() {
+        AppLog.info("pinnedButton menu", ["action": "open", "bundleID": bundleID])
+        onLaunch?(bundleID)
+    }
 }

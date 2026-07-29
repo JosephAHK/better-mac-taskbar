@@ -62,6 +62,7 @@ final class StartHotkeyMonitor {
         }
         modifierHeld = false
         chordUsed = false
+        AppLog.debug("StartHotkeyMonitor.stop")
     }
 
     private var configuredHotkey: StartMenuHotkey { TaskbarSettings.shared.startMenuHotkey }
@@ -117,6 +118,7 @@ final class StartHotkeyMonitor {
     }
 
     private func fireToggle() {
+        AppLog.info("startHotkey fired", ["hotkey": configuredHotkey.displayString])
         DispatchQueue.main.async {
             TaskbarPanelController.shared.toggleStartMenu()
         }
