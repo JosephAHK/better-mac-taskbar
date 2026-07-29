@@ -52,6 +52,7 @@ Automation permission may also be requested the first time the app raises or min
 Menu bar icon → **Settings…**, or Start → Settings:
 
 - Center taskbar icons
+- Taskbar buttons: **Compact** (icons only) or **Wide** (icons with window titles, like Windows 10/11)
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar
 - Start menu hotkey (click to record; Reset restores ⌘ / Windows key)

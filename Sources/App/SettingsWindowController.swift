@@ -5,7 +5,7 @@ final class SettingsWindowController: NSWindowController {
 
     private init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 580),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -32,6 +32,8 @@ final class SettingsWindowController: NSWindowController {
 
 final class SettingsView: NSView {
     private let centerCheckbox = NSButton(checkboxWithTitle: "Center taskbar icons", target: nil, action: nil)
+    private let styleLabel = NSTextField(labelWithString: "Taskbar buttons")
+    private let stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let dockCheckbox = NSButton(checkboxWithTitle: "Hide Dock (use taskbar instead)", target: nil, action: nil)
     private let autoHideCheckbox = NSButton(checkboxWithTitle: "Automatically hide the taskbar", target: nil, action: nil)
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
@@ -66,36 +68,53 @@ final class SettingsView: NSView {
         centerCheckbox.autoresizingMask = [.minYMargin]
         addSubview(centerCheckbox)
 
+        styleLabel.font = NSFont.systemFont(ofSize: 13)
+        styleLabel.frame = NSRect(x: 24, y: frameRect.height - 138, width: 120, height: 24)
+        styleLabel.autoresizingMask = [.minYMargin]
+        addSubview(styleLabel)
+
+        for style in TaskbarButtonStyle.allCases {
+            stylePopup.addItem(withTitle: style.displayName)
+            stylePopup.lastItem?.representedObject = style.rawValue
+        }
+        stylePopup.target = self
+        stylePopup.action = #selector(styleChanged)
+        stylePopup.frame = NSRect(x: 150, y: frameRect.height - 140, width: 246, height: 26)
+        stylePopup.autoresizingMask = [.minYMargin]
+        stylePopup.toolTip = "Wide buttons show each window's title, like Windows 10/11"
+        addSubview(stylePopup)
+        syncStylePopup()
+
         dockCheckbox.state = TaskbarSettings.shared.replaceDock ? .on : .off
         dockCheckbox.target = self
         dockCheckbox.action = #selector(dockChanged)
-        dockCheckbox.frame = NSRect(x: 24, y: frameRect.height - 136, width: 300, height: 24)
+        dockCheckbox.frame = NSRect(x: 24, y: frameRect.height - 176, width: 300, height: 24)
         dockCheckbox.autoresizingMask = [.minYMargin]
         addSubview(dockCheckbox)
 
         autoHideCheckbox.state = TaskbarSettings.shared.autoHideTaskbar ? .on : .off
         autoHideCheckbox.target = self
         autoHideCheckbox.action = #selector(autoHideChanged)
-        autoHideCheckbox.frame = NSRect(x: 24, y: frameRect.height - 172, width: 340, height: 24)
+        autoHideCheckbox.frame = NSRect(x: 24, y: frameRect.height - 212, width: 340, height: 24)
         autoHideCheckbox.autoresizingMask = [.minYMargin]
         addSubview(autoHideCheckbox)
 
         launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
         launchAtLoginCheckbox.target = self
         launchAtLoginCheckbox.action = #selector(launchAtLoginChanged)
-        launchAtLoginCheckbox.frame = NSRect(x: 24, y: frameRect.height - 208, width: 340, height: 24)
+        launchAtLoginCheckbox.frame = NSRect(x: 24, y: frameRect.height - 248, width: 340, height: 24)
         launchAtLoginCheckbox.autoresizingMask = [.minYMargin]
         addSubview(launchAtLoginCheckbox)
 
         hotkeyLabel.font = NSFont.systemFont(ofSize: 13)
-        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 250, width: 140, height: 24)
+        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 290, width: 140, height: 24)
         hotkeyLabel.autoresizingMask = [.minYMargin]
         addSubview(hotkeyLabel)
 
         hotkeyButton.bezelStyle = .rounded
         hotkeyButton.target = self
         hotkeyButton.action = #selector(beginHotkeyRecording)
-        hotkeyButton.frame = NSRect(x: 170, y: frameRect.height - 252, width: 150, height: 28)
+        hotkeyButton.frame = NSRect(x: 170, y: frameRect.height - 292, width: 150, height: 28)
         hotkeyButton.autoresizingMask = [.minYMargin]
         hotkeyButton.toolTip = "Click, then press the shortcut you want for Start"
         addSubview(hotkeyButton)
@@ -103,19 +122,19 @@ final class SettingsView: NSView {
         hotkeyResetButton.bezelStyle = .rounded
         hotkeyResetButton.target = self
         hotkeyResetButton.action = #selector(resetHotkey)
-        hotkeyResetButton.frame = NSRect(x: 328, y: frameRect.height - 252, width: 68, height: 28)
+        hotkeyResetButton.frame = NSRect(x: 328, y: frameRect.height - 292, width: 68, height: 28)
         hotkeyResetButton.autoresizingMask = [.minYMargin]
         hotkeyResetButton.toolTip = "Reset to ⌘ / Windows key"
         addSubview(hotkeyResetButton)
 
         hiddenSectionLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 300, width: 300, height: 20)
+        hiddenSectionLabel.frame = NSRect(x: 24, y: frameRect.height - 340, width: 300, height: 20)
         hiddenSectionLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenSectionLabel)
 
         hiddenEmptyLabel.font = NSFont.systemFont(ofSize: 12)
         hiddenEmptyLabel.textColor = .secondaryLabelColor
-        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 324, width: 370, height: 18)
+        hiddenEmptyLabel.frame = NSRect(x: 24, y: frameRect.height - 364, width: 370, height: 18)
         hiddenEmptyLabel.autoresizingMask = [.minYMargin]
         addSubview(hiddenEmptyLabel)
 
@@ -141,7 +160,7 @@ final class SettingsView: NSView {
         hiddenScroll.borderType = .bezelBorder
         hiddenScroll.drawsBackground = true
         hiddenScroll.backgroundColor = NSColor.controlBackgroundColor
-        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 440)
+        hiddenScroll.frame = NSRect(x: 24, y: 100, width: 372, height: frameRect.height - 480)
         hiddenScroll.autoresizingMask = [.width, .height]
         addSubview(hiddenScroll)
 
@@ -239,6 +258,18 @@ final class SettingsView: NSView {
 
     @objc private func showHiddenApp(_ sender: NSButton) {
         HideManager.removeHidden(bundleID: sender.identifier?.rawValue ?? "")
+    }
+
+    private func syncStylePopup() {
+        let current = TaskbarSettings.shared.buttonStyle.rawValue
+        let index = stylePopup.itemArray.firstIndex { $0.representedObject as? String == current } ?? 0
+        stylePopup.selectItem(at: index)
+    }
+
+    @objc private func styleChanged() {
+        guard let raw = stylePopup.selectedItem?.representedObject as? String,
+              let style = TaskbarButtonStyle(rawValue: raw) else { return }
+        TaskbarSettings.shared.buttonStyle = style
     }
 
     @objc private func centerChanged() {

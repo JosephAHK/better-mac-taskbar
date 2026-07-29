@@ -25,32 +25,35 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     var orderKey: String { windowInfo.id }
 
     private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
     private let underline = NSView()
     private var tracking: NSTrackingArea?
+    private let style: TaskbarButtonStyle
+    private let barHeight: CGFloat
 
-    init(windowInfo: WindowInfo, size: CGFloat) {
+    init(windowInfo: WindowInfo, height: CGFloat, width: CGFloat, style: TaskbarButtonStyle) {
         self.windowInfo = windowInfo
-        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        self.style = style
+        self.barHeight = height
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
-        setup(size: size)
+        setup()
         toolTip = windowInfo.displayTitle
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func setup(size: CGFloat) {
+    private func setup() {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.wantsLayer = true
         iconView.layer?.cornerRadius = 3
         addSubview(iconView)
 
-        let iconSize = max(18, min(size * 0.55, 36))
-        iconView.frame = NSRect(
-            x: (size - iconSize) / 2,
-            y: (size - iconSize) / 2 + 1,
-            width: iconSize,
-            height: iconSize
-        )
+        titleLabel.font = NSFont.systemFont(ofSize: 12)
+        titleLabel.textColor = .white
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.isHidden = !style.showsTitle
+        addSubview(titleLabel)
 
         if let app = NSRunningApplication(processIdentifier: windowInfo.pid) {
             iconView.image = app.icon
@@ -62,25 +65,73 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         underline.layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
         underline.layer?.cornerRadius = 1
         addSubview(underline)
+        titleLabel.stringValue = Self.labelText(for: windowInfo)
+        layoutContents()
         updateUnderline()
     }
 
     func apply(_ info: WindowInfo) {
         windowInfo = info
         toolTip = info.displayTitle
+        if style.showsTitle {
+            titleLabel.stringValue = Self.labelText(for: info)
+        }
         updateUnderline()
+    }
+
+    /// Window title where we have one, otherwise the app name — the app name is
+    /// already implied by the icon, so the document title is the useful part.
+    private static func labelText(for info: WindowInfo) -> String {
+        info.title.isEmpty ? info.appName : info.title
+    }
+
+    override func layout() {
+        super.layout()
+        layoutContents()
+        updateUnderline()
+    }
+
+    private func layoutContents() {
+        let iconSize = max(18, min(barHeight * 0.55, 36))
+        if style.showsTitle {
+            let inset: CGFloat = 10
+            iconView.frame = NSRect(
+                x: inset,
+                y: (bounds.height - iconSize) / 2,
+                width: iconSize,
+                height: iconSize
+            )
+            let textX = iconView.frame.maxX + 8
+            titleLabel.frame = NSRect(
+                x: textX,
+                y: (bounds.height - 16) / 2 - 1,
+                width: max(bounds.width - textX - inset, 0),
+                height: 16
+            )
+        } else {
+            iconView.frame = NSRect(
+                x: (bounds.width - iconSize) / 2,
+                y: (bounds.height - iconSize) / 2 + 1,
+                width: iconSize,
+                height: iconSize
+            )
+        }
     }
 
     func updateUnderline() {
         let width = bounds.width
+        // Labeled buttons are wide, so the accent hugs the edges more tightly
+        // than the square icons do (matching the Windows 10 look).
+        let activeInset: CGFloat = style.showsTitle ? 4 : 10
+        let idleInset: CGFloat = style.showsTitle ? 8 : 18
         if windowInfo.isActive {
             underline.layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
-            underline.frame = NSRect(x: 10, y: 0, width: max(width - 20, 8), height: 4)
+            underline.frame = NSRect(x: activeInset, y: 0, width: max(width - activeInset * 2, 8), height: 4)
             underline.isHidden = false
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
         } else {
             underline.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.45).cgColor
-            underline.frame = NSRect(x: 18, y: 0, width: max(width - 36, 6), height: 3)
+            underline.frame = NSRect(x: idleInset, y: 0, width: max(width - idleInset * 2, 6), height: 3)
             underline.isHidden = false
             layer?.backgroundColor = NSColor.clear.cgColor
         }
@@ -200,21 +251,60 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
     var orderKey: String { bundleID }
 
     private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
     private var tracking: NSTrackingArea?
+    private let style: TaskbarButtonStyle
+    private let barHeight: CGFloat
 
-    init(bundleID: String, size: CGFloat) {
+    init(bundleID: String, height: CGFloat, width: CGFloat, style: TaskbarButtonStyle) {
         self.bundleID = bundleID
-        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        self.style = style
+        self.barHeight = height
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.image = PinManager.icon(forBundleID: bundleID)
-        let iconSize = max(18, min(size * 0.55, 36))
-        iconView.frame = NSRect(x: (size - iconSize) / 2, y: (size - iconSize) / 2, width: iconSize, height: iconSize)
         addSubview(iconView)
+
+        titleLabel.font = NSFont.systemFont(ofSize: 12)
+        titleLabel.textColor = .white
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.stringValue = PinManager.appName(forBundleID: bundleID)
+        titleLabel.isHidden = !style.showsTitle
+        addSubview(titleLabel)
+
+        layoutContents()
         toolTip = PinManager.appName(forBundleID: bundleID)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        layoutContents()
+    }
+
+    private func layoutContents() {
+        let iconSize = max(18, min(barHeight * 0.55, 36))
+        if style.showsTitle {
+            let inset: CGFloat = 10
+            iconView.frame = NSRect(x: inset, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize)
+            let textX = iconView.frame.maxX + 8
+            titleLabel.frame = NSRect(
+                x: textX,
+                y: (bounds.height - 16) / 2 - 1,
+                width: max(bounds.width - textX - inset, 0),
+                height: 16
+            )
+        } else {
+            iconView.frame = NSRect(
+                x: (bounds.width - iconSize) / 2,
+                y: (bounds.height - iconSize) / 2,
+                width: iconSize,
+                height: iconSize
+            )
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

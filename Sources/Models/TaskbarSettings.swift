@@ -97,6 +97,30 @@ struct StartMenuHotkey: Equatable {
     }
 }
 
+/// How a taskbar button is drawn.
+enum TaskbarButtonStyle: String, CaseIterable {
+    /// Square, icon-only buttons (the original look).
+    case compact
+    /// Wide rectangles with the icon plus the window/app title, like Windows 10/11.
+    case labeled
+
+    static let `default` = TaskbarButtonStyle.compact
+
+    var showsTitle: Bool { self == .labeled }
+
+    var displayName: String {
+        switch self {
+        case .compact: return "Compact (icons only)"
+        case .labeled: return "Wide (icons with titles)"
+        }
+    }
+
+    /// Widest a labeled button may grow to.
+    static let maxLabeledWidth: CGFloat = 200
+    /// Below this a title is unreadable, so labeled buttons collapse back to squares.
+    static let minLabeledWidth: CGFloat = 112
+}
+
 final class TaskbarSettings {
     static let shared = TaskbarSettings()
 
@@ -106,6 +130,7 @@ final class TaskbarSettings {
     private let defaults = UserDefaults.standard
     private enum Key {
         static let centerIcons = "centerIcons"
+        static let buttonStyle = "taskbarButtonStyle"
         static let replaceDock = "replaceDock"
         static let autoHideTaskbar = "autoHideTaskbar"
         static let pinnedBundleIDs = "pinnedBundleIDs"
@@ -128,6 +153,21 @@ final class TaskbarSettings {
     }
 
     var barHeight: CGFloat { Self.barHeight }
+
+    /// Icon-only squares, or wide buttons showing the window title.
+    var buttonStyle: TaskbarButtonStyle {
+        get {
+            guard let raw = defaults.string(forKey: Key.buttonStyle),
+                  let style = TaskbarButtonStyle(rawValue: raw) else {
+                return .default
+            }
+            return style
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Key.buttonStyle)
+            NotificationCenter.default.post(name: .taskbarSettingsChanged, object: nil)
+        }
+    }
 
     var replaceDock: Bool {
         get { defaults.object(forKey: Key.replaceDock) as? Bool ?? true }
