@@ -142,4 +142,45 @@ else
 fi
 
 echo "==> Built: $APP_DIR"
-echo "Run with: open \"$APP_DIR\""
+
+# Install to /Applications so the app has one stable home. Accessibility is
+# granted per-path, so running from build/ means re-granting whenever the
+# working copy moves. Set BMT_NO_INSTALL=1 to build without installing.
+# Prefer /Applications; fall back to ~/Applications when not an admin user.
+INSTALL_DIR="/Applications"
+if [[ ! -w "$INSTALL_DIR" ]]; then
+  INSTALL_DIR="$HOME/Applications"
+  mkdir -p "$INSTALL_DIR"
+fi
+INSTALLED_APP="$INSTALL_DIR/${APP_NAME}.app"
+if [[ "${BMT_NO_INSTALL:-0}" == "1" ]]; then
+  echo "==> Skipping install (BMT_NO_INSTALL=1)"
+  RUN_APP="$APP_DIR"
+elif [[ -w "$INSTALL_DIR" ]]; then
+  echo "==> Installing to $INSTALLED_APP"
+  # Quit the installed copy first — overwriting a running bundle corrupts it.
+  if pgrep -f "$INSTALLED_APP/Contents/MacOS/$EXEC_NAME" >/dev/null 2>&1; then
+    echo "    Quitting running copy"
+    pkill -f "$INSTALLED_APP/Contents/MacOS/$EXEC_NAME" || true
+    sleep 1
+  fi
+  # Replace in place: ditto preserves the signature, rsync --delete clears stale files.
+  rm -rf "$INSTALLED_APP.tmp"
+  if ditto "$APP_DIR" "$INSTALLED_APP.tmp"; then
+    rm -rf "$INSTALLED_APP"
+    mv "$INSTALLED_APP.tmp" "$INSTALLED_APP"
+    # Re-assert the signature so the CDHash matches what TCC verifies.
+    codesign --verify --deep --strict "$INSTALLED_APP" >/dev/null 2>&1 \
+      || echo "    Warning: installed copy failed signature verification"
+    RUN_APP="$INSTALLED_APP"
+  else
+    echo "    Warning: install failed — falling back to $APP_DIR"
+    rm -rf "$INSTALLED_APP.tmp"
+    RUN_APP="$APP_DIR"
+  fi
+else
+  echo "==> $INSTALL_DIR not writable — skipping install"
+  RUN_APP="$APP_DIR"
+fi
+
+echo "Run with: open \"$RUN_APP\""
