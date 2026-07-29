@@ -121,29 +121,58 @@ final class WindowManager {
                 self?.refresh()
                 self?.reclaimFrontIfStolen(for: payload)
             }
+            // Deminimize animation finishes after the immediate refresh, so that
+            // snapshot can still carry the old isMinimized flag. Re-read once the
+            // animation is done, otherwise the next click reads stale state.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                self?.refresh()
+            }
         }
     }
 
-    /// Win10 taskbar click: minimize if this window is already front and visible;
-    /// otherwise restore / activate it.
-    func activateOrMinimizeWindow(_ info: WindowInfo) {
-        // Fast path from strip state — avoid synchronous AX probes on the click.
-        let isTaskbarActive = info.isActive || lastActivatedWindowID == info.id
-        let willMinimize = !info.isMinimized && isTaskbarActive
-        AppLog.info("taskbarClick", [
-            "id": info.id,
-            "app": info.appName,
-            "decision": info.isMinimized ? "restore" : (willMinimize ? "minimize" : "activate"),
-            "wasActive": info.isActive,
-            "lastActivated": lastActivatedWindowID ?? "-"
-        ])
-        if info.isMinimized {
-            activateWindow(info)
-        } else if willMinimize {
-            minimizeWindow(info)
-        } else {
-            activateWindow(info)
+    /// Whether *this specific window* is displayed on the currently active Space.
+    ///
+    /// `.optionOnScreenOnly` omits minimized windows entirely, which makes it the
+    /// authoritative "is it actually on screen right now" test — the yellow-button
+    /// case AX can still be lying about. It is also Space-scoped, unlike
+    /// countRealWindows(), which deliberately spans all Spaces.
+    ///
+    /// Matching on cgWindowID (not just PID) matters: a multi-window app with one
+    /// window minimized and another visible would otherwise report "present" and the
+    /// click would minimize the visible sibling instead of restoring the one clicked.
+    private func isWindowOnActiveSpace(_ info: WindowInfo) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            // Can't tell — assume present so we don't turn a legitimate minimize
+            // click into an unexpected raise.
+            return true
         }
+        let onScreen = list.filter { dict in
+            guard (dict[kCGWindowOwnerPID as String] as? pid_t) == info.pid else { return false }
+            guard (dict[kCGWindowLayer as String] as? Int ?? -1) == 0 else { return false }
+            let alpha = dict[kCGWindowAlpha as String] as? Double ?? 1
+            guard alpha > 0.05 else { return false }
+            let bounds = dict[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            return (bounds["Width"] ?? 0) >= 200 && (bounds["Height"] ?? 0) >= 200
+        }
+
+        // Exact window match when the snapshot carries a CG id.
+        if let cgID = info.cgWindowID {
+            return onScreen.contains { ($0[kCGWindowNumber as String] as? CGWindowID) == cgID }
+        }
+        // Title match next — distinguishes siblings when no CG id is recorded.
+        if !info.title.isEmpty {
+            let byTitle = onScreen.contains { ($0[kCGWindowName as String] as? String) == info.title }
+            if byTitle { return true }
+            // Titles are often unavailable without Screen Recording permission; only
+            // trust a title miss when some window of this app did report a title.
+            let anyTitled = onScreen.contains { !(($0[kCGWindowName as String] as? String) ?? "").isEmpty }
+            if anyTitled { return false }
+        }
+        // Fall back to app-level presence.
+        return !onScreen.isEmpty
     }
 
     /// Minimize one window (does not hide the whole app).
@@ -327,8 +356,23 @@ final class WindowManager {
             "axMatch": liveMatch != nil
         ])
 
+        var axRestored = false
         if let ax = liveMatch {
             AccessibilityService.raise(ax, pid: info.pid)
+            // raise() retries deminimize, but it can still lose (Chrome, Electron,
+            // sandboxed apps). Only count this as a restore if the window actually
+            // came back — otherwise fall through to the scripted path below so the
+            // first click succeeds instead of needing a second one.
+            axRestored = !AccessibilityService.isMinimized(ax)
+            if !axRestored {
+                _ = AccessibilityService.raiseScriptedWindow(
+                    bundleID: info.bundleID,
+                    appName: info.appName,
+                    title: info.title,
+                    pid: info.pid
+                )
+                axRestored = !AccessibilityService.isMinimized(ax)
+            }
         } else {
             // Hidden apps (Spotify Cmd+H) often still report a CG frame with isMinimized=false
             // and an empty title — still need scripted deminiaturize / reopen, not bare activate.
@@ -369,7 +413,7 @@ final class WindowManager {
         // Mail, Notes, etc.) while windows stay hidden/unordered. Reopen via Launch
         // Services whenever the app has no real window at all, or was hidden/minimized.
         // Skip reopen when a window already exists — avoids spawning extras in Electron.
-        let needsLSReopen = liveMatch == nil
+        let needsLSReopen = !axRestored
             && (wasHidden || info.isMinimized || realWindows == 0)
 
         if needsLSReopen {
@@ -384,6 +428,42 @@ final class WindowManager {
                     ensureFrontmostViaLaunchServices(bundleID: bundleID)
                 }
             }
+        }
+
+        // Everything above only ever establishes that the *app* is frontmost. That is
+        // not the same as the clicked *window* being visible: activate() flips the menu
+        // bar and can leave the window behind other apps' windows, or behind a sibling
+        // of its own. When the app was already frontmost (stillNotFront == false) the
+        // branches above do nothing at all, so the click appears to have no effect.
+        // Verify the actual window and re-raise if it did not come forward.
+        ensureWindowOrderedFront(info)
+    }
+
+    /// Confirm the clicked window is really on screen; re-raise if not.
+    /// Runs on the background raise queue, so short sleeps are safe here.
+    private func ensureWindowOrderedFront(_ info: WindowInfo) {
+        for attempt in 0..<3 {
+            // Give the WindowServer time to reflect the activate/raise before judging.
+            Thread.sleep(forTimeInterval: attempt == 0 ? 0.08 : 0.12)
+            if isWindowOnActiveSpace(info) { return }
+
+            let axWindows = AccessibilityService.windows(for: info.pid)
+            if let ax = resolveAXWindow(for: info, in: axWindows) {
+                AccessibilityService.deminimize(ax)
+                AXUIElementSetAttributeValue(ax, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementSetAttributeValue(ax, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(ax, kAXRaiseAction as CFString)
+            } else if attempt > 0 {
+                // AX can't see it — last resort is the scripted AXRaise by title.
+                _ = AccessibilityService.raiseScriptedWindow(
+                    bundleID: info.bundleID,
+                    appName: info.appName,
+                    title: info.title,
+                    pid: info.pid
+                )
+            }
+            _ = NSRunningApplication(processIdentifier: info.pid)?
+                .activate(options: [.activateIgnoringOtherApps])
         }
     }
 
@@ -443,6 +523,8 @@ final class WindowManager {
         if let match = titled.first { return match }
 
         // Fall back to CG frame correlation when titles are blank/duplicated.
+        // Note: a stale cached axElement is deliberately NOT used as a last resort —
+        // see the `return nil` below.
         if let cgID = info.cgWindowID,
            let entry = buildCGIndex().first(where: { $0.windowID == cgID && $0.pid == info.pid }) {
             let byFrame = axWindows.min(by: { a, b in
@@ -457,7 +539,11 @@ final class WindowManager {
             }
         }
 
-        return info.axElement
+        // No live match. Returning the stale cached element here would make
+        // raiseWindow() believe it has a real window and skip the scripted /
+        // Launch Services restore — the first click then does nothing and the
+        // user has to click again. Report the miss instead.
+        return nil
     }
 
     private func cachedScriptedTitles(bundleID: String) -> [String] {

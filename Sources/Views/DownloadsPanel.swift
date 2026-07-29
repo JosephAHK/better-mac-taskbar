@@ -613,6 +613,7 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
     var onDragEnded: (() -> Void)?
 
     private let deleteButton = NSButton()
+    private let iconView = NSImageView()
     private var tracking: NSTrackingArea?
     private var mouseDownPoint: NSPoint?
     private var didStartDrag = false
@@ -624,10 +625,16 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
         wantsLayer = true
         layer?.cornerRadius = 4
 
-        let icon = NSImageView(frame: NSRect(x: 8, y: 6, width: 28, height: 28))
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.image = NSWorkspace.shared.icon(forFile: url.path)
-        addSubview(icon)
+        iconView.frame = NSRect(x: 8, y: 6, width: 28, height: 28)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.image = NSWorkspace.shared.icon(forFile: url.path)
+        addSubview(iconView)
+        if !entry.isDirectory, ImageThumbnailer.isImage(url) {
+            ImageThumbnailer.thumbnail(for: url, maxPixelSize: 56) { [weak iconView] image in
+                guard let image else { return }
+                iconView?.image = image
+            }
+        }
 
         let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - 24
         let name = NSTextField(labelWithString: url.lastPathComponent)

@@ -129,10 +129,19 @@ final class TaskbarContentView: NSView {
 
         let center = TaskbarSettings.shared.centerIcons
         if center {
+            // Center on the whole screen width (like Windows 11), not just the leftover
+            // space between the Start button and tray — those two are rarely symmetric,
+            // so centering within tasksContainer alone visibly drifts off true center.
+            // Lower-priority centerX yields to the required containment constraints
+            // below once there are enough icons to collide with Start/tray.
+            let centerX = stack.centerXAnchor.constraint(equalTo: centerXAnchor)
+            centerX.priority = .defaultHigh
             NSLayoutConstraint.activate([
-                stack.centerXAnchor.constraint(equalTo: tasksContainer.centerXAnchor),
+                centerX,
                 stack.centerYAnchor.constraint(equalTo: tasksContainer.centerYAnchor),
-                stack.heightAnchor.constraint(equalTo: tasksContainer.heightAnchor)
+                stack.heightAnchor.constraint(equalTo: tasksContainer.heightAnchor),
+                stack.leadingAnchor.constraint(greaterThanOrEqualTo: tasksContainer.leadingAnchor, constant: 4),
+                stack.trailingAnchor.constraint(lessThanOrEqualTo: tasksContainer.trailingAnchor, constant: -4)
             ])
         } else {
             NSLayoutConstraint.activate([
@@ -157,7 +166,7 @@ final class TaskbarContentView: NSView {
                 let button = TaskButtonView(windowInfo: info, size: buttonSize)
                 button.dragDelegate = self
                 button.onActivate = { info in
-                    WindowManager.shared.activateOrMinimizeWindow(info)
+                    WindowManager.shared.activateWindow(info)
                 }
                 button.onClose = { info in
                     WindowManager.shared.closeWindow(info)
@@ -218,6 +227,17 @@ final class TaskbarContentView: NSView {
             case .window(let info): return info.id
             }
         }
+
+        /// Keys to try, in priority order, when looking up a persisted rank.
+        /// A pinned icon is ranked by bundleID, but the moment its app launches the
+        /// same slot becomes a `.window` item keyed by window id — unranked, so it
+        /// would jump to the far right. Falling back to bundleID keeps the icon put.
+        var rankKeys: [String] {
+            switch self {
+            case .pinned(let bundleID): return [bundleID]
+            case .window(let info): return [info.id, info.bundleID].compactMap { $0 }
+            }
+        }
     }
 
     private static func orderedDisplayItems() -> [DisplayItem] {
@@ -242,9 +262,16 @@ final class TaskbarContentView: NSView {
             rank[key] = index
         }
 
+        func rankOf(_ item: DisplayItem) -> Int {
+            for key in item.rankKeys {
+                if let r = rank[key] { return r }
+            }
+            return Int.max
+        }
+
         return items.enumerated().sorted { a, b in
-            let ra = rank[a.element.orderKey] ?? Int.max
-            let rb = rank[b.element.orderKey] ?? Int.max
+            let ra = rankOf(a.element)
+            let rb = rankOf(b.element)
             if ra != rb { return ra < rb }
             return a.offset < b.offset
         }.map(\.element)
@@ -259,6 +286,12 @@ final class TaskbarContentView: NSView {
             let key = orderable.orderKey
             if seen.insert(key).inserted {
                 order.append(key)
+            }
+            // Write the bundleID right behind the window id so the slot survives a
+            // relaunch (window ids are per-launch) and so a pinned icon that starts
+            // running lands where its pinned placeholder sat.
+            if let alias = orderable.orderAliasKey, seen.insert(alias).inserted {
+                order.append(alias)
             }
         }
 

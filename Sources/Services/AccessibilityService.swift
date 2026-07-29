@@ -70,6 +70,13 @@ enum AccessibilityService {
         boolValue(element, kAXMinimizedAttribute as CFString) ?? false
     }
 
+    /// True when the window is in macOS fullscreen (green button). Fullscreen windows
+    /// live on their own Space and refuse AXMinimized, so a taskbar click must raise
+    /// them rather than try — and fail — to minimize.
+    static func isFullScreen(_ element: AXUIElement) -> Bool {
+        boolValue(element, "AXFullScreen" as CFString) ?? false
+    }
+
     static func isMain(_ element: AXUIElement) -> Bool {
         boolValue(element, kAXMainAttribute as CFString) ?? false
     }

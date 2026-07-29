@@ -19,3 +19,6 @@ build/
 # Local logs
 *.log
 !README.md
+
+# Per-machine Claude Code settings (absolute paths, local permissions)
+.claude/settings.local.json
