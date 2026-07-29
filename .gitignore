@@ -22,3 +22,6 @@ build/
 
 # Per-machine Claude Code settings (absolute paths, local permissions)
 .claude/settings.local.json
+
+# Local worktrees
+.claude/worktrees/
