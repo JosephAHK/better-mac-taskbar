@@ -159,6 +159,49 @@ final class WindowManager {
         return !onScreen.isEmpty
     }
 
+    /// Whether this window is the front-most of its own app's windows.
+    ///
+    /// `isWindowOnActiveSpace` only answers "is it visible", which is always true for a
+    /// sibling sitting behind another window of the same app — clicking Chrome window B
+    /// while A is in front would look satisfied and never get reordered. CG returns
+    /// windows front-to-back, so the clicked window must be the app's first entry.
+    ///
+    /// Returns true when the app has at most one real window, or when we cannot identify
+    /// the window well enough to judge — never block a raise on a guess.
+    private func isWindowFrontOfSiblings(_ info: WindowInfo) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return true
+        }
+
+        let siblings = list.filter { dict in
+            guard (dict[kCGWindowOwnerPID as String] as? pid_t) == info.pid else { return false }
+            guard (dict[kCGWindowLayer as String] as? Int ?? -1) == 0 else { return false }
+            let alpha = dict[kCGWindowAlpha as String] as? Double ?? 1
+            guard alpha > 0.05 else { return false }
+            let bounds = dict[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            return (bounds["Width"] ?? 0) >= 200 && (bounds["Height"] ?? 0) >= 200
+        }
+
+        // Nothing to be in front of.
+        guard siblings.count > 1, let front = siblings.first else { return true }
+
+        // CG id is authoritative when the snapshot carries one.
+        if let cgID = info.cgWindowID {
+            return (front[kCGWindowNumber as String] as? CGWindowID) == cgID
+        }
+        // Titles need Screen Recording to be populated; only trust them when present.
+        if !info.title.isEmpty,
+           let frontTitle = front[kCGWindowName as String] as? String,
+           !frontTitle.isEmpty {
+            return frontTitle == info.title
+        }
+        // Can't tell which sibling was clicked — let the raise proceed.
+        return true
+    }
+
     /// Minimize one window (does not hide the whole app).
     func minimizeWindow(_ info: WindowInfo) {
         if lastActivatedWindowID == info.id {
@@ -371,13 +414,16 @@ final class WindowManager {
         ensureWindowOrderedFront(info)
     }
 
-    /// Confirm the clicked window is really on screen; re-raise if not.
-    /// Runs on the background raise queue, so short sleeps are safe here.
+    /// Confirm the clicked window is really on screen *and* in front of its siblings;
+    /// re-raise if not. Runs on the background raise queue, so short sleeps are safe.
     private func ensureWindowOrderedFront(_ info: WindowInfo) {
         for attempt in 0..<3 {
             // Give the WindowServer time to reflect the activate/raise before judging.
             Thread.sleep(forTimeInterval: attempt == 0 ? 0.08 : 0.12)
-            if isWindowOnActiveSpace(info) { return }
+            // Presence alone is not enough: with two Chrome windows the clicked one is
+            // already on screen but behind its sibling, so a presence-only check would
+            // return here and skip the AXRaise that actually reorders it.
+            if isWindowOnActiveSpace(info) && isWindowFrontOfSiblings(info) { return }
 
             let axWindows = AccessibilityService.windows(for: info.pid)
             if let ax = resolveAXWindow(for: info, in: axWindows) {
