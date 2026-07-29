@@ -1,7 +1,7 @@
 import AppKit
 
 /// Opens the Start menu for the configured hotkey (default: Windows / ⌘ alone).
-final class StartHotkeyMonitor {
+final class StartHotkeyMonitor: NSObject {
     static let shared = StartHotkeyMonitor()
 
     /// When true, the monitor ignores input (e.g. while Settings is recording a new shortcut).
@@ -14,11 +14,33 @@ final class StartHotkeyMonitor {
 
     private var modifierHeld = false
     private var chordUsed = false
+    /// True between start() and stop(), regardless of whether the hotkey is enabled.
+    private var isStarted = false
 
-    private init() {}
+    private override init() {
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(hotkeySettingsChanged),
+            name: .startMenuHotkeyChanged,
+            object: nil
+        )
+    }
+
+    /// Reinstall (or tear down) the monitors after the shortcut or its enabled state changes.
+    @objc private func hotkeySettingsChanged() {
+        guard isStarted else { return }
+        start()
+    }
 
     func start() {
         stop()
+        isStarted = true
+
+        guard TaskbarSettings.shared.startHotkeyEnabled else {
+            AppLog.info("StartHotkeyMonitor.start", ["enabled": false])
+            return
+        }
 
         localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.handleFlagsChanged(event)
@@ -62,6 +84,7 @@ final class StartHotkeyMonitor {
         }
         modifierHeld = false
         chordUsed = false
+        isStarted = false
     }
 
     private var configuredHotkey: StartMenuHotkey { TaskbarSettings.shared.startMenuHotkey }
