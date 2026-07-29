@@ -261,10 +261,23 @@ private struct AppearancePage: View {
                 }
                 Row(
                     title: "Automatically hide",
-                    subtitle: "Slide the taskbar off-screen until the pointer reaches the bottom edge.",
-                    isLast: true
+                    subtitle: "Slide the taskbar off-screen until the pointer reaches the bottom edge."
                 ) {
                     Toggle("", isOn: $store.autoHideTaskbar).settingsToggle()
+                }
+                Row(
+                    title: "Button style",
+                    subtitle: "Wide buttons show each window's title next to its icon, like Windows 10.",
+                    isLast: true
+                ) {
+                    Picker("", selection: $store.buttonStyle) {
+                        ForEach(TaskbarButtonStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 190)
                 }
             }
 

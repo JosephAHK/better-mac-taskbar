@@ -25,6 +25,13 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var buttonStyle: TaskbarButtonStyle {
+        didSet {
+            guard buttonStyle != TaskbarSettings.shared.buttonStyle else { return }
+            TaskbarSettings.shared.buttonStyle = buttonStyle
+        }
+    }
+
     @Published var autoHideTaskbar: Bool {
         didSet {
             guard autoHideTaskbar != TaskbarSettings.shared.autoHideTaskbar else { return }
@@ -74,6 +81,7 @@ final class SettingsStore: ObservableObject {
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
+        buttonStyle = TaskbarSettings.shared.buttonStyle
         launchAtLogin = LaunchAtLogin.isEnabled
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
@@ -105,6 +113,7 @@ final class SettingsStore: ObservableObject {
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
+        buttonStyle = TaskbarSettings.shared.buttonStyle
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         reloadHiddenApps()
         reloadHotkey()
