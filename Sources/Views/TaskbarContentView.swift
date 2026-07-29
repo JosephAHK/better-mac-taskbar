@@ -231,7 +231,7 @@ final class TaskbarContentView: NSView {
         /// would jump to the far right. Falling back to bundleID keeps the icon put.
         var rankKeys: [String] {
             switch self {
-            case .pinned(let bundleID): return [bundleID]
+            case .pinned(let bundleID), .launching(let bundleID): return [bundleID]
             case .window(let info): return [info.id, info.bundleID].compactMap { $0 }
             }
         }
