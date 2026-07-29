@@ -9,6 +9,13 @@ protocol TaskbarIconDragDelegate: AnyObject {
 
 protocol TaskbarOrderable {
     var orderKey: String { get }
+    /// Extra key written next to `orderKey` so the slot keeps its place after the
+    /// window id changes (app quit/relaunch, or a pinned icon becoming a window).
+    var orderAliasKey: String? { get }
+}
+
+extension TaskbarOrderable {
+    var orderAliasKey: String? { nil }
 }
 
 final class TaskButtonView: NSView, TaskbarOrderable {
@@ -23,6 +30,7 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     weak var dragDelegate: TaskbarIconDragDelegate?
 
     var orderKey: String { windowInfo.id }
+    var orderAliasKey: String? { windowInfo.bundleID }
 
     private let iconView = NSImageView()
     private let underline = NSView()

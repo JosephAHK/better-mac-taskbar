@@ -257,6 +257,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     private var folderFD: Int32 = -1
     private var allFiles: [TrashEntry] = []
     private var filteredFiles: [TrashEntry] = []
+    private var needsFullDiskAccess = false
     private lazy var currentURL: URL = Self.trashRootURL()
     private var backStack: [URL] = []
     private var isAtRoot: Bool { backStack.isEmpty }
@@ -553,22 +554,35 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         let url = currentURL
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .nameKey]
-        let files = (try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        let entries = files.map { fileURL in
-            let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            return TrashEntry(url: fileURL, isDirectory: isDirectory)
-        }
-        allFiles = entries.sorted { a, b in
-            let da = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let db = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return da > db
+        do {
+            let files = try fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles]
+            )
+            needsFullDiskAccess = false
+            let entries = files.map { fileURL in
+                let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                return TrashEntry(url: fileURL, isDirectory: isDirectory)
+            }
+            allFiles = entries.sorted { a, b in
+                let da = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let db = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return da > db
+            }
+        } catch {
+            // ~/.Trash is TCC-protected — without Full Disk Access this throws
+            // NSFileReadNoPermissionError and would otherwise look like "Trash is empty".
+            needsFullDiskAccess = (error as NSError).code == 257
+            allFiles = []
         }
         applyFilter()
+    }
+
+    @objc private func openFullDiskAccessSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func applyFilter() {
@@ -586,6 +600,11 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
                 let name = entry.url.lastPathComponent
                 return tokens.allSatisfy { name.localizedCaseInsensitiveContains($0) }
             }
+        }
+
+        if needsFullDiskAccess {
+            addFullDiskAccessMessage()
+            return
         }
 
         if filteredFiles.isEmpty {
@@ -632,6 +651,44 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         }
     }
 
+    private func addFullDiskAccessMessage() {
+        let message = NSTextField(wrappingLabelWithString: "Better Mac Taskbar needs Full Disk Access to show what’s in the Trash.")
+        message.font = NSFont.systemFont(ofSize: 13)
+        message.textColor = .secondaryLabelColor
+        message.alignment = .center
+        message.translatesAutoresizingMaskIntoConstraints = false
+
+        let openSettings = NSButton(
+            title: "Open Full Disk Access Settings…",
+            target: self,
+            action: #selector(openFullDiskAccessSettings)
+        )
+        openSettings.bezelStyle = .inline
+        openSettings.isBordered = false
+        openSettings.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        openSettings.contentTintColor = NSColor(calibratedRed: 0.35, green: 0.72, blue: 1, alpha: 1)
+        openSettings.translatesAutoresizingMaskIntoConstraints = false
+
+        let column = NSStackView(views: [message, openSettings])
+        column.orientation = .vertical
+        column.spacing = 10
+        column.alignment = .centerX
+        column.translatesAutoresizingMaskIntoConstraints = false
+
+        let rowWidth = max(bounds.width - 16, 300)
+        let wrap = NSView()
+        wrap.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(column)
+        NSLayoutConstraint.activate([
+            wrap.widthAnchor.constraint(equalToConstant: rowWidth),
+            wrap.heightAnchor.constraint(equalToConstant: 140),
+            column.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
+            column.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
+            message.widthAnchor.constraint(equalToConstant: rowWidth - 32)
+        ])
+        stack.addArrangedSubview(wrap)
+    }
+
     private func startWatching() {
         stopWatching()
         let path = currentURL.path
@@ -671,6 +728,7 @@ private final class TrashFileRow: NSView, NSDraggingSource {
     var onDragEnded: (() -> Void)?
 
     private let restoreButton = NSButton()
+    private let iconView = NSImageView()
     private let allowsRestore: Bool
     private var tracking: NSTrackingArea?
     private var mouseDownPoint: NSPoint?
@@ -684,10 +742,16 @@ private final class TrashFileRow: NSView, NSDraggingSource {
         wantsLayer = true
         layer?.cornerRadius = 4
 
-        let icon = NSImageView(frame: NSRect(x: 8, y: 6, width: 28, height: 28))
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.image = NSWorkspace.shared.icon(forFile: url.path)
-        addSubview(icon)
+        iconView.frame = NSRect(x: 8, y: 6, width: 28, height: 28)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.image = NSWorkspace.shared.icon(forFile: url.path)
+        addSubview(iconView)
+        if !entry.isDirectory, ImageThumbnailer.isImage(url) {
+            ImageThumbnailer.thumbnail(for: url, maxPixelSize: 56) { [weak iconView] image in
+                guard let image else { return }
+                iconView?.image = image
+            }
+        }
 
         let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - (allowsRestore ? 24 : 0)
         let name = NSTextField(labelWithString: url.lastPathComponent)
