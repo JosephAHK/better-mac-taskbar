@@ -35,6 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             TaskbarSettings.shared.didPromptDock = true
         }
         AppLog.info("application ready")
+        // Dev aid: the status-menu item can't be driven from a script, so allow
+        // launching straight into Settings for screenshots / manual checks.
+        if ProcessInfo.processInfo.environment["BMT_OPEN_SETTINGS"] == "1" {
+            SettingsWindowController.shared.show()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

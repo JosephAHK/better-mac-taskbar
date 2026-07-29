@@ -37,6 +37,7 @@ swiftc \
   -framework CoreGraphics \
   -framework ServiceManagement \
   -framework ImageIO \
+  -framework SwiftUI \
   -O \
   "${SOURCES[@]}" \
   -o "$MACOS_DIR/$EXEC_NAME"
@@ -52,7 +53,8 @@ if [[ ! -x "$MACOS_DIR/$EXEC_NAME" ]]; then
     -framework ApplicationServices \
     -framework CoreGraphics \
     -framework ServiceManagement \
-  -framework ImageIO \
+    -framework ImageIO \
+    -framework SwiftUI \
     -O \
     "${SOURCES[@]}" \
     -o "$MACOS_DIR/$EXEC_NAME"

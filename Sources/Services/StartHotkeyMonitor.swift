@@ -66,8 +66,10 @@ final class StartHotkeyMonitor {
 
     private var configuredHotkey: StartMenuHotkey { TaskbarSettings.shared.startMenuHotkey }
 
+    private var isEnabled: Bool { TaskbarSettings.shared.startHotkeyEnabled }
+
     private func handleFlagsChanged(_ event: NSEvent) {
-        guard !isSuspended else { return }
+        guard !isSuspended, isEnabled else { return }
         let hotkey = configuredHotkey
         guard hotkey.modifierOnly else { return }
         guard let targetFlag = StartMenuHotkey.modifierFlag(forKeyCode: hotkey.keyCode) else { return }
@@ -93,7 +95,7 @@ final class StartHotkeyMonitor {
     }
 
     private func handleKeyDown(_ event: NSEvent) {
-        guard !isSuspended else { return }
+        guard !isSuspended, isEnabled else { return }
         let hotkey = configuredHotkey
 
         if hotkey.modifierOnly {
