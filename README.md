@@ -54,7 +54,7 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Center taskbar icons
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar
-- Start menu hotkey (click to record; Reset restores ⌘ / Windows key)
+- Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key)
 - Launch at login
 
 ## Project layout

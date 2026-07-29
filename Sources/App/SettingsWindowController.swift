@@ -35,7 +35,7 @@ final class SettingsView: NSView {
     private let dockCheckbox = NSButton(checkboxWithTitle: "Hide Dock (use taskbar instead)", target: nil, action: nil)
     private let autoHideCheckbox = NSButton(checkboxWithTitle: "Automatically hide the taskbar", target: nil, action: nil)
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
-    private let hotkeyLabel = NSTextField(labelWithString: "Start menu hotkey")
+    private let hotkeyEnabledCheckbox = NSButton(checkboxWithTitle: "Start menu hotkey", target: nil, action: nil)
     private let hotkeyButton = NSButton(title: "", target: nil, action: nil)
     private let hotkeyResetButton = NSButton(title: "Reset", target: nil, action: nil)
     private let hiddenSectionLabel = NSTextField(labelWithString: "Always hide on taskbar")
@@ -87,10 +87,13 @@ final class SettingsView: NSView {
         launchAtLoginCheckbox.autoresizingMask = [.minYMargin]
         addSubview(launchAtLoginCheckbox)
 
-        hotkeyLabel.font = NSFont.systemFont(ofSize: 13)
-        hotkeyLabel.frame = NSRect(x: 24, y: frameRect.height - 250, width: 140, height: 24)
-        hotkeyLabel.autoresizingMask = [.minYMargin]
-        addSubview(hotkeyLabel)
+        hotkeyEnabledCheckbox.state = TaskbarSettings.shared.startMenuHotkeyEnabled ? .on : .off
+        hotkeyEnabledCheckbox.target = self
+        hotkeyEnabledCheckbox.action = #selector(hotkeyEnabledChanged)
+        hotkeyEnabledCheckbox.frame = NSRect(x: 24, y: frameRect.height - 250, width: 150, height: 24)
+        hotkeyEnabledCheckbox.autoresizingMask = [.minYMargin]
+        hotkeyEnabledCheckbox.toolTip = "Uncheck to stop any key from opening the Start menu"
+        addSubview(hotkeyEnabledCheckbox)
 
         hotkeyButton.bezelStyle = .rounded
         hotkeyButton.target = self
@@ -168,6 +171,10 @@ final class SettingsView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc func reloadHotkeyDisplay() {
+        let enabled = TaskbarSettings.shared.startMenuHotkeyEnabled
+        hotkeyEnabledCheckbox.state = enabled ? .on : .off
+        hotkeyButton.isEnabled = enabled
+        hotkeyResetButton.isEnabled = enabled
         guard !isRecordingHotkey else { return }
         hotkeyButton.title = TaskbarSettings.shared.startMenuHotkey.displayString
     }
@@ -263,6 +270,15 @@ final class SettingsView: NSView {
         if !LaunchAtLogin.setEnabled(want) {
             launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
         }
+    }
+
+    @objc private func hotkeyEnabledChanged() {
+        let enabled = hotkeyEnabledCheckbox.state == .on
+        if !enabled {
+            stopHotkeyRecording(restoreTitle: true)
+        }
+        TaskbarSettings.shared.startMenuHotkeyEnabled = enabled
+        reloadHotkeyDisplay()
     }
 
     @objc private func resetHotkey() {

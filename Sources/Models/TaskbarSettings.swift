@@ -117,6 +117,7 @@ final class TaskbarSettings {
         static let startHotkeyKeyCode = "startHotkeyKeyCode"
         static let startHotkeyModifiers = "startHotkeyModifiers"
         static let startHotkeyModifierOnly = "startHotkeyModifierOnly"
+        static let startHotkeyEnabled = "startHotkeyEnabled"
     }
 
     var centerIcons: Bool {
@@ -187,6 +188,15 @@ final class TaskbarSettings {
     var didConfigureLaunchAtLogin: Bool {
         get { defaults.bool(forKey: Key.didConfigureLaunchAtLogin) }
         set { defaults.set(newValue, forKey: Key.didConfigureLaunchAtLogin) }
+    }
+
+    /// When false, no keyboard shortcut opens the Start menu.
+    var startMenuHotkeyEnabled: Bool {
+        get { defaults.object(forKey: Key.startHotkeyEnabled) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Key.startHotkeyEnabled)
+            NotificationCenter.default.post(name: .startMenuHotkeyChanged, object: nil)
+        }
     }
 
     /// Shortcut that opens / closes the Start menu (default: ⌘ / Windows key alone).
