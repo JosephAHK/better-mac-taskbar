@@ -25,6 +25,7 @@ final class TaskbarContentView: NSView {
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .pinnedAppsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .hiddenAppsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .taskbarOrderChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .launchingAppsChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -143,9 +144,10 @@ final class TaskbarContentView: NSView {
 
         for item in items {
             switch item {
-            case .pinned(let bundleID):
+            case .pinned(let bundleID), .launching(let bundleID):
                 let pinned = PinnedButtonView(bundleID: bundleID, size: buttonSize)
                 pinned.dragDelegate = self
+                pinned.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
                 pinned.onLaunch = { PinManager.launch(bundleID: $0) }
                 pinned.onUnpin = { PinManager.togglePin(bundleID: $0) }
                 pinned.onHide = { HideManager.toggleHidden(bundleID: $0) }
@@ -192,15 +194,18 @@ final class TaskbarContentView: NSView {
         guard views.count == items.count else { return false }
         for (view, item) in zip(views, items) {
             switch item {
-            case .pinned(let bundleID):
+            case .pinned(let bundleID), .launching(let bundleID):
                 guard (view as? PinnedButtonView)?.bundleID == bundleID else { return false }
             case .window(let info):
                 guard (view as? TaskButtonView)?.windowInfo.id == info.id else { return false }
             }
         }
         for (view, item) in zip(views, items) {
-            if case .window(let info) = item, let button = view as? TaskButtonView {
-                button.apply(info)
+            switch item {
+            case .window(let info):
+                (view as? TaskButtonView)?.apply(info)
+            case .pinned(let bundleID), .launching(let bundleID):
+                (view as? PinnedButtonView)?.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
             }
         }
         return true
@@ -208,11 +213,14 @@ final class TaskbarContentView: NSView {
 
     private enum DisplayItem {
         case pinned(String)
+        /// Unpinned app mid-launch — a placeholder slot that disappears once its
+        /// first window shows up (or the launch times out).
+        case launching(String)
         case window(WindowInfo)
 
         var orderKey: String {
             switch self {
-            case .pinned(let bundleID): return bundleID
+            case .pinned(let bundleID), .launching(let bundleID): return bundleID
             case .window(let info): return info.id
             }
         }
@@ -241,6 +249,15 @@ final class TaskbarContentView: NSView {
         for info in windows {
             if let bid = info.bundleID, hidden.contains(bid) { continue }
             items.append(.window(info))
+        }
+        // An app opened from the Start menu has no icon on the strip yet — give it a
+        // temporary slot at the end so the opening indicator is visible somewhere.
+        let pinnedSet = Set(TaskbarSettings.shared.pinnedBundleIDs)
+        for bundleID in LaunchTracker.shared.launchingBundleIDs.sorted()
+            where !pinnedSet.contains(bundleID)
+            && !runningBundleIDs.contains(bundleID)
+            && !hidden.contains(bundleID) {
+            items.append(.launching(bundleID))
         }
 
         let order = TaskbarSettings.shared.taskbarOrder

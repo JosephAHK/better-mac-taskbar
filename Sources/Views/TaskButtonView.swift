@@ -208,7 +208,9 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
     var orderKey: String { bundleID }
 
     private let iconView = NSImageView()
+    private let spinner = NSProgressIndicator()
     private var tracking: NSTrackingArea?
+    private(set) var isLaunching = false
 
     init(bundleID: String, size: CGFloat) {
         self.bundleID = bundleID
@@ -216,13 +218,48 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         wantsLayer = true
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.image = PinManager.icon(forBundleID: bundleID)
+        iconView.wantsLayer = true
         let iconSize = max(18, min(size * 0.55, 36))
         iconView.frame = NSRect(x: (size - iconSize) / 2, y: (size - iconSize) / 2, width: iconSize, height: iconSize)
         addSubview(iconView)
+
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        let spinnerSize: CGFloat = 12
+        spinner.frame = NSRect(x: (size - spinnerSize) / 2, y: 1, width: spinnerSize, height: spinnerSize)
+        addSubview(spinner)
+
         toolTip = PinManager.appName(forBundleID: bundleID)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Shows the "opening" state: spinner under a dimmed, pulsing icon, matching
+    /// Windows' feedback for the gap between click and first window.
+    func setLaunching(_ launching: Bool) {
+        guard launching != isLaunching else { return }
+        isLaunching = launching
+        toolTip = launching
+            ? "Opening \(PinManager.appName(forBundleID: bundleID))…"
+            : PinManager.appName(forBundleID: bundleID)
+
+        if launching {
+            spinner.startAnimation(nil)
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.85
+            pulse.toValue = 0.35
+            pulse.duration = 0.7
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            iconView.layer?.add(pulse, forKey: "launchPulse")
+        } else {
+            spinner.stopAnimation(nil)
+            iconView.layer?.removeAnimation(forKey: "launchPulse")
+            iconView.layer?.opacity = 1
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

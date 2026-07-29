@@ -134,7 +134,13 @@ enum PinManager {
     static func launch(bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
         let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: url, configuration: config)
+        // Mark before the call so the taskbar shows the opening indicator on the
+        // very next layout pass, not after the workspace gets around to it.
+        LaunchTracker.shared.begin(bundleID: bundleID)
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
+            guard error != nil || app == nil else { return }
+            DispatchQueue.main.async { LaunchTracker.shared.finish(bundleID: bundleID) }
+        }
     }
 
     static func icon(forBundleID bundleID: String) -> NSImage? {
