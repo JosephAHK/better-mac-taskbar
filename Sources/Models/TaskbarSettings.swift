@@ -209,7 +209,7 @@ final class TaskbarSettings {
     }
 
     /// Seconds to wait after the pointer leaves before sliding the taskbar away.
-    static let autoHideDelayRange: ClosedRange<Double> = 0...2
+    static let autoHideDelayRange: ClosedRange<Double> = 0...1
     static let autoHideDelayDefault: Double = 0.45
 
     var autoHideDelay: Double {

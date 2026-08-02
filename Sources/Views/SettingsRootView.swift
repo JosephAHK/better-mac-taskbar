@@ -274,23 +274,19 @@ private struct AppearancePage: View {
                         subtitle: "How close the pointer must get to the bottom edge. Set to 1 px to require touching the edge."
                     ) {
                         let range = TaskbarSettings.autoHideRevealZoneRange
-                        HStack(alignment: .center, spacing: 8) {
+                        AutoHideSliderControl(
+                            valueLabel: "\(Int(store.autoHideRevealZone.rounded())) px",
+                            isDefault: Int(store.autoHideRevealZone.rounded())
+                                == TaskbarSettings.autoHideRevealZoneDefault,
+                            onReset: {
+                                store.autoHideRevealZone = Double(TaskbarSettings.autoHideRevealZoneDefault)
+                            }
+                        ) {
                             SettingsSlider(
                                 value: $store.autoHideRevealZone,
                                 range: Double(range.lowerBound)...Double(range.upperBound),
                                 tickMarks: 4
                             )
-                            .frame(width: 120, height: 22)
-                            Text("\(Int(store.autoHideRevealZone.rounded())) px")
-                                .font(.system(size: 12).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .frame(width: 36, alignment: .trailing)
-                            ResetDefaultButton(
-                                isDefault: Int(store.autoHideRevealZone.rounded())
-                                    == TaskbarSettings.autoHideRevealZoneDefault
-                            ) {
-                                store.autoHideRevealZone = Double(TaskbarSettings.autoHideRevealZoneDefault)
-                            }
                         }
                     }
                     Row(
@@ -298,22 +294,18 @@ private struct AppearancePage: View {
                         subtitle: "How long to wait after the pointer leaves before the taskbar slides away."
                     ) {
                         let range = TaskbarSettings.autoHideDelayRange
-                        HStack(alignment: .center, spacing: 8) {
+                        AutoHideSliderControl(
+                            valueLabel: String(format: "%.2f s", store.autoHideDelay),
+                            isDefault: abs(store.autoHideDelay - TaskbarSettings.autoHideDelayDefault) < 0.001,
+                            onReset: {
+                                store.autoHideDelay = TaskbarSettings.autoHideDelayDefault
+                            }
+                        ) {
                             SettingsSlider(
                                 value: $store.autoHideDelay,
                                 range: range.lowerBound...range.upperBound,
                                 tickMarks: 5
                             )
-                            .frame(width: 120, height: 22)
-                            Text(String(format: "%.2f s", store.autoHideDelay))
-                                .font(.system(size: 12).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .frame(width: 44, alignment: .trailing)
-                            ResetDefaultButton(
-                                isDefault: abs(store.autoHideDelay - TaskbarSettings.autoHideDelayDefault) < 0.001
-                            ) {
-                                store.autoHideDelay = TaskbarSettings.autoHideDelayDefault
-                            }
                         }
                     }
                 }
@@ -548,6 +540,36 @@ private struct EmptyStateCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: Metrics.cardCorner, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+/// Shared layout for auto-hide sliders so tracks share the same leading X.
+private struct AutoHideSliderControl<Slider: View>: View {
+    private static var sliderWidth: CGFloat { 120 }
+    private static var valueWidth: CGFloat { 48 }
+    private static var resetWidth: CGFloat { 16 }
+    private static var spacing: CGFloat { 8 }
+
+    let valueLabel: String
+    let isDefault: Bool
+    let onReset: () -> Void
+    @ViewBuilder var slider: () -> Slider
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Self.spacing) {
+            slider()
+                .frame(width: Self.sliderWidth, height: 22)
+            Text(valueLabel)
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: Self.valueWidth, alignment: .trailing)
+            ResetDefaultButton(isDefault: isDefault, action: onReset)
+                .frame(width: Self.resetWidth)
+        }
+        .frame(
+            width: Self.sliderWidth + Self.valueWidth + Self.resetWidth + Self.spacing * 2,
+            alignment: .trailing
         )
     }
 }
