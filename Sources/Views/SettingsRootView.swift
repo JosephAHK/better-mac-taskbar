@@ -270,11 +270,11 @@ private struct AppearancePage: View {
                         title: "Reveal zone",
                         subtitle: "How close the pointer must get to the bottom edge. Set to 1 px to require touching the edge."
                     ) {
+                        let range = TaskbarSettings.autoHideRevealZoneRange
                         HStack(spacing: 8) {
                             Slider(
                                 value: $store.autoHideRevealZone,
-                                in: Double(TaskbarSettings.autoHideRevealZoneRange.lowerBound)
-                                    ...Double(TaskbarSettings.autoHideRevealZoneRange.upperBound),
+                                in: Double(range.lowerBound)...Double(range.upperBound),
                                 step: 1
                             )
                             .controlSize(.small)
