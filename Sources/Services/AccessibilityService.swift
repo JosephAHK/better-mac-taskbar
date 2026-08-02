@@ -3,6 +3,18 @@ import AppKit
 import ApplicationServices
 import Darwin
 
+// Deprecated Process Manager symbols are unavailable to Swift (macOS 10.9+), but still
+// export from ApplicationServices. Front-window-only activation needs them — same
+// approach as AltTab / WindowFairy after Big Sur broke NSRunningApplication.activate.
+@_silgen_name("GetProcessForPID")
+private func BMTGetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+@_silgen_name("SetFrontProcessWithOptions")
+private func BMTSetFrontProcessWithOptions(
+    _ psn: UnsafePointer<ProcessSerialNumber>,
+    _ options: OptionBits
+) -> OSStatus
+private let kBMTFrontWindowOnly: OptionBits = 1
+
 enum AccessibilityService {
     static func isTrusted(prompt: Bool) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
@@ -97,7 +109,8 @@ enum AccessibilityService {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         // Single raise — retrying AXRaise animates the window up the z-order one step at a time.
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        _ = app.activate(options: [.activateIgnoringOtherApps])
+        // Front-window-only: plain activate() stacks every sibling above other apps.
+        _ = activateFrontWindowOnly(pid: pid)
 
         // If still miniaturized, only retry deminimize (no extra AXRaise).
         if isMinimized(element) {
@@ -108,8 +121,29 @@ enum AccessibilityService {
             }
             if !isMinimized(element) {
                 AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+                _ = activateFrontWindowOnly(pid: pid)
             }
         }
+    }
+
+    /// Activate an app without dragging every sibling window above other apps.
+    ///
+    /// Since Big Sur, `NSRunningApplication.activate` often brings *all* windows
+    /// forward even without `.activateAllWindows`. After AXRaise / AXMain, the
+    /// deprecated Process Manager "front window only" option still raises just
+    /// the key/main window (WindowFairy / AltTab pattern).
+    @discardableResult
+    static func activateFrontWindowOnly(pid: pid_t) -> Bool {
+        var psn = ProcessSerialNumber()
+        guard BMTGetProcessForPID(pid, &psn) == noErr else {
+            return NSRunningApplication(processIdentifier: pid)?
+                .activate(options: [.activateIgnoringOtherApps]) ?? false
+        }
+        if BMTSetFrontProcessWithOptions(&psn, kBMTFrontWindowOnly) == noErr {
+            return true
+        }
+        return NSRunningApplication(processIdentifier: pid)?
+            .activate(options: [.activateIgnoringOtherApps]) ?? false
     }
 
     /// Raise a specific window by title (stable). Index-based raise is wrong because
@@ -257,10 +291,11 @@ enum AccessibilityService {
 
     /// Activate / unhide an app when AX and AppleScript deminimize are unavailable.
     /// Does not reopen an already-running app — that can spawn a second Electron window.
+    /// Uses front-window-only activation so sibling windows stay behind other apps.
     static func forceShowApp(pid: pid_t, bundleID: String?) {
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.unhide()
-            _ = app.activate(options: [.activateIgnoringOtherApps])
+            _ = activateFrontWindowOnly(pid: pid)
             return
         }
         guard let bundleID,

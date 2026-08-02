@@ -15,7 +15,6 @@ final class TaskbarPanelController {
     private var revealedIDs: Set<ObjectIdentifier> = []
 
     private let peekHeight: CGFloat = 2
-    private let hideDelay: TimeInterval = 0.45
     private let animationDuration: TimeInterval = 0.18
 
     func show() {
@@ -238,7 +237,8 @@ final class TaskbarPanelController {
 
     private func scheduleHideAll() {
         guard hideTimer == nil else { return }
-        hideTimer = Timer.scheduledTimer(withTimeInterval: hideDelay, repeats: false) { [weak self] _ in
+        let delay = TaskbarSettings.shared.autoHideDelay
+        let fire: () -> Void = { [weak self] in
             guard let self else { return }
             self.hideTimer = nil
             guard self.keepVisibleCount == 0 else { return }
@@ -255,6 +255,13 @@ final class TaskbarPanelController {
                     self.setRevealed(false, for: id, animated: true)
                 }
             }
+        }
+        if delay <= 0 {
+            fire()
+            return
+        }
+        hideTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
+            fire()
         }
         if let hideTimer {
             RunLoop.main.add(hideTimer, forMode: .common)

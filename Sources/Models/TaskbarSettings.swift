@@ -134,6 +134,7 @@ final class TaskbarSettings {
         static let replaceDock = "replaceDock"
         static let autoHideTaskbar = "autoHideTaskbar"
         static let autoHideRevealZone = "autoHideRevealZone"
+        static let autoHideDelay = "autoHideDelay"
         static let pinnedBundleIDs = "pinnedBundleIDs"
         static let hiddenBundleIDs = "hiddenBundleIDs"
         static let taskbarOrder = "taskbarOrder"
@@ -204,6 +205,24 @@ final class TaskbarSettings {
         set {
             let clamped = min(max(newValue, Self.autoHideRevealZoneRange.lowerBound), Self.autoHideRevealZoneRange.upperBound)
             defaults.set(clamped, forKey: Key.autoHideRevealZone)
+        }
+    }
+
+    /// Seconds to wait after the pointer leaves before sliding the taskbar away.
+    static let autoHideDelayRange: ClosedRange<Double> = 0...2
+    static let autoHideDelayDefault: Double = 0.45
+
+    var autoHideDelay: Double {
+        get {
+            guard defaults.object(forKey: Key.autoHideDelay) != nil else {
+                return Self.autoHideDelayDefault
+            }
+            let raw = defaults.double(forKey: Key.autoHideDelay)
+            return min(max(raw, Self.autoHideDelayRange.lowerBound), Self.autoHideDelayRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.autoHideDelayRange.lowerBound), Self.autoHideDelayRange.upperBound)
+            defaults.set(clamped, forKey: Key.autoHideDelay)
         }
     }
 

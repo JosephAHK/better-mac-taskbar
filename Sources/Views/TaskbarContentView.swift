@@ -275,19 +275,36 @@ final class TaskbarContentView: NSView {
     private static func orderedDisplayItems() -> [DisplayItem] {
         let windows = WindowManager.shared.windows
         let hidden = Set(TaskbarSettings.shared.hiddenBundleIDs)
+        let pinnedIDs = TaskbarSettings.shared.pinnedBundleIDs.filter { !hidden.contains($0) }
+        let pinnedSet = Set(pinnedIDs)
         let runningBundleIDs = Set(windows.compactMap(\.bundleID))
-        var items: [DisplayItem] = []
-        for bundleID in TaskbarSettings.shared.pinnedBundleIDs
-            where !runningBundleIDs.contains(bundleID) && !hidden.contains(bundleID) {
-            items.append(.pinned(bundleID))
-        }
+
+        // Keep each pinned app in its pin slot when it starts running. The old path
+        // listed leftover pins first, then *all* windows — so a newly opened pin
+        // jumped to the far right of the strip whenever taskbarOrder was empty.
+        var windowsByPinnedBundle: [String: [WindowInfo]] = [:]
+        var unpinnedWindows: [WindowInfo] = []
         for info in windows {
             if let bid = info.bundleID, hidden.contains(bid) { continue }
-            items.append(.window(info))
+            if let bid = info.bundleID, pinnedSet.contains(bid) {
+                windowsByPinnedBundle[bid, default: []].append(info)
+            } else {
+                unpinnedWindows.append(info)
+            }
         }
+
+        var items: [DisplayItem] = []
+        for bundleID in pinnedIDs {
+            if let running = windowsByPinnedBundle[bundleID], !running.isEmpty {
+                items.append(contentsOf: running.map { .window($0) })
+            } else {
+                items.append(.pinned(bundleID))
+            }
+        }
+        items.append(contentsOf: unpinnedWindows.map { .window($0) })
+
         // An app opened from the Start menu has no icon on the strip yet — give it a
         // temporary slot at the end so the opening indicator is visible somewhere.
-        let pinnedSet = Set(TaskbarSettings.shared.pinnedBundleIDs)
         for bundleID in LaunchTracker.shared.launchingBundleIDs.sorted()
             where !pinnedSet.contains(bundleID)
             && !runningBundleIDs.contains(bundleID)
@@ -313,7 +330,11 @@ final class TaskbarContentView: NSView {
         return items.enumerated().sorted { a, b in
             let ra = rankOf(a.element)
             let rb = rankOf(b.element)
-            if ra != rb { return ra < rb }
+            let aKnown = ra != Int.max
+            let bKnown = rb != Int.max
+            // Only compare persisted ranks when both sides have one. Otherwise keep the
+            // pin-aware construction order so a first-time launch doesn't jump right.
+            if aKnown, bKnown, ra != rb { return ra < rb }
             return a.offset < b.offset
         }.map(\.element)
     }
@@ -380,8 +401,15 @@ final class TaskbarContentView: NSView {
 
         // Keep the view in the hierarchy — removeFromSuperview mid-drag
         // cancels mouse tracking and leaves the icon stuck grey.
-        stack.removeArrangedSubview(view)
-        stack.insertArrangedSubview(view, at: toIndex)
+        // Animate sibling slides so reordering doesn't snap.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+            context.allowsImplicitAnimation = true
+            stack.removeArrangedSubview(view)
+            stack.insertArrangedSubview(view, at: toIndex)
+            stack.layoutSubtreeIfNeeded()
+        }
         didReorderDuringDrag = true
     }
 

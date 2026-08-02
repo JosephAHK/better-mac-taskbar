@@ -47,6 +47,21 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var autoHideDelay: Double {
+        didSet {
+            // Snap to 0.05 s without using Slider.step (which draws macOS tick marks).
+            let snapped = (autoHideDelay * 20).rounded() / 20
+            let clamped = min(max(snapped, TaskbarSettings.autoHideDelayRange.lowerBound),
+                              TaskbarSettings.autoHideDelayRange.upperBound)
+            if abs(autoHideDelay - clamped) > 0.0001 {
+                autoHideDelay = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.autoHideDelay) > 0.001 else { return }
+            TaskbarSettings.shared.autoHideDelay = clamped
+        }
+    }
+
     @Published var launchAtLogin: Bool {
         didSet {
             guard launchAtLogin != LaunchAtLogin.isEnabled else { return }
@@ -90,6 +105,7 @@ final class SettingsStore: ObservableObject {
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
+        autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
         launchAtLogin = LaunchAtLogin.isEnabled
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
@@ -123,6 +139,7 @@ final class SettingsStore: ObservableObject {
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
+        autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         reloadHiddenApps()

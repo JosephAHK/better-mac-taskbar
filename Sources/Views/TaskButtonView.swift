@@ -18,6 +18,19 @@ extension TaskbarOrderable {
     var orderAliasKey: String? { nil }
 }
 
+/// Context menus from a bottom-edge `.nonactivatingPanel` mis-place with
+/// `popUpContextMenu` (stuck to the screen bottom). Pop upward from the icon instead.
+fileprivate func popUpTaskbarIconMenu(_ menu: NSMenu, with event: NSEvent, in view: NSView) {
+    TaskbarPanelController.shared.beginKeepVisible()
+    defer { TaskbarPanelController.shared.endKeepVisible() }
+
+    let local = view.convert(event.locationInWindow, from: nil)
+    // Top of the icon — AppKit grows the menu downward from this point, then flips
+    // it above the taskbar when there isn't room below (screen edge).
+    let anchor = NSPoint(x: local.x, y: view.bounds.maxY)
+    menu.popUp(positioning: nil, at: anchor, in: view)
+}
+
 final class TaskButtonView: NSView, TaskbarOrderable {
     private(set) var windowInfo: WindowInfo
     var onActivate: ((WindowInfo) -> Void)?
@@ -233,7 +246,7 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         quit.target = self
         menu.addItem(quit)
 
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        popUpTaskbarIconMenu(menu, with: event, in: self)
     }
 
     @objc private func pinToggle() { onPinToggle?(windowInfo) }
@@ -397,7 +410,7 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         let open = NSMenuItem(title: "Open", action: #selector(openApp), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        popUpTaskbarIconMenu(menu, with: event, in: self)
     }
 
     @objc private func unpin() { onUnpin?(bundleID) }

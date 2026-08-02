@@ -440,8 +440,8 @@ final class WindowManager {
                     pid: info.pid
                 )
             }
-            _ = NSRunningApplication(processIdentifier: info.pid)?
-                .activate(options: [.activateIgnoringOtherApps])
+            // Front-window-only — plain activate stacks every sibling to positions 1…N.
+            _ = AccessibilityService.activateFrontWindowOnly(pid: info.pid)
         }
     }
 

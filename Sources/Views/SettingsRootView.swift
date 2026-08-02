@@ -151,7 +151,8 @@ private struct Row<Control: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            // Top-align so multi-line subtitles don't pull toggles/sliders to mid-row.
+            HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 13))
@@ -164,6 +165,8 @@ private struct Row<Control: View>: View {
                 }
                 Spacer(minLength: 8)
                 control
+                    // Optically center short controls with the 13pt title line.
+                    .padding(.top, 1)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -271,18 +274,46 @@ private struct AppearancePage: View {
                         subtitle: "How close the pointer must get to the bottom edge. Set to 1 px to require touching the edge."
                     ) {
                         let range = TaskbarSettings.autoHideRevealZoneRange
-                        HStack(spacing: 8) {
-                            Slider(
+                        HStack(alignment: .center, spacing: 8) {
+                            SettingsSlider(
                                 value: $store.autoHideRevealZone,
-                                in: Double(range.lowerBound)...Double(range.upperBound),
-                                step: 1
+                                range: Double(range.lowerBound)...Double(range.upperBound),
+                                tickMarks: 4
                             )
-                            .controlSize(.small)
-                            .frame(width: 120)
+                            .frame(width: 120, height: 22)
                             Text("\(Int(store.autoHideRevealZone.rounded())) px")
                                 .font(.system(size: 12).monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(width: 36, alignment: .trailing)
+                            ResetDefaultButton(
+                                isDefault: Int(store.autoHideRevealZone.rounded())
+                                    == TaskbarSettings.autoHideRevealZoneDefault
+                            ) {
+                                store.autoHideRevealZone = Double(TaskbarSettings.autoHideRevealZoneDefault)
+                            }
+                        }
+                    }
+                    Row(
+                        title: "Hide delay",
+                        subtitle: "How long to wait after the pointer leaves before the taskbar slides away."
+                    ) {
+                        let range = TaskbarSettings.autoHideDelayRange
+                        HStack(alignment: .center, spacing: 8) {
+                            SettingsSlider(
+                                value: $store.autoHideDelay,
+                                range: range.lowerBound...range.upperBound,
+                                tickMarks: 5
+                            )
+                            .frame(width: 120, height: 22)
+                            Text(String(format: "%.2f s", store.autoHideDelay))
+                                .font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
+                            ResetDefaultButton(
+                                isDefault: abs(store.autoHideDelay - TaskbarSettings.autoHideDelayDefault) < 0.001
+                            ) {
+                                store.autoHideDelay = TaskbarSettings.autoHideDelayDefault
+                            }
                         }
                     }
                 }
@@ -518,6 +549,73 @@ private struct EmptyStateCard: View {
             RoundedRectangle(cornerRadius: Metrics.cardCorner, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
+    }
+}
+
+/// Rotate icon that restores a slider to its default; dimmed when already at default.
+private struct ResetDefaultButton: View {
+    let isDefault: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isDefault ? Color.secondary.opacity(0.35) : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDefault)
+        .help("Reset to default")
+        .accessibilityLabel("Reset to default")
+    }
+}
+
+/// AppKit slider with a few guide ticks — SwiftUI `step` draws one tick per step (too dense).
+private struct SettingsSlider: NSViewRepresentable {
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    var tickMarks: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = NSSlider(
+            value: value,
+            minValue: range.lowerBound,
+            maxValue: range.upperBound,
+            target: context.coordinator,
+            action: #selector(Coordinator.valueChanged(_:))
+        )
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.numberOfTickMarks = max(tickMarks, 0)
+        slider.allowsTickMarkValuesOnly = false
+        slider.tickMarkPosition = .below
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.parent = self
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
+        slider.numberOfTickMarks = max(tickMarks, 0)
+        if abs(slider.doubleValue - value) > 0.0001 {
+            slider.doubleValue = value
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: SettingsSlider
+
+        init(_ parent: SettingsSlider) {
+            self.parent = parent
+        }
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            parent.value = sender.doubleValue
+        }
     }
 }
 
