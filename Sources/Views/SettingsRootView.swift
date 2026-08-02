@@ -265,6 +265,27 @@ private struct AppearancePage: View {
                 ) {
                     Toggle("", isOn: $store.autoHideTaskbar).settingsToggle()
                 }
+                if store.autoHideTaskbar {
+                    Row(
+                        title: "Reveal zone",
+                        subtitle: "How close the pointer must get to the bottom edge. Set to 1 px to require touching the edge."
+                    ) {
+                        HStack(spacing: 8) {
+                            Slider(
+                                value: $store.autoHideRevealZone,
+                                in: Double(TaskbarSettings.autoHideRevealZoneRange.lowerBound)
+                                    ...Double(TaskbarSettings.autoHideRevealZoneRange.upperBound),
+                                step: 1
+                            )
+                            .controlSize(.small)
+                            .frame(width: 120)
+                            Text("\(Int(store.autoHideRevealZone.rounded())) px")
+                                .font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 36, alignment: .trailing)
+                        }
+                    }
+                }
                 Row(
                     title: "Button style",
                     subtitle: "Wide buttons show each window's title next to its icon, like Windows 10.",

@@ -39,6 +39,14 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var autoHideRevealZone: Double {
+        didSet {
+            let value = Int(autoHideRevealZone.rounded())
+            guard value != TaskbarSettings.shared.autoHideRevealZone else { return }
+            TaskbarSettings.shared.autoHideRevealZone = value
+        }
+    }
+
     @Published var launchAtLogin: Bool {
         didSet {
             guard launchAtLogin != LaunchAtLogin.isEnabled else { return }
@@ -81,6 +89,7 @@ final class SettingsStore: ObservableObject {
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
+        autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         buttonStyle = TaskbarSettings.shared.buttonStyle
         launchAtLogin = LaunchAtLogin.isEnabled
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
@@ -113,6 +122,7 @@ final class SettingsStore: ObservableObject {
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
+        autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         buttonStyle = TaskbarSettings.shared.buttonStyle
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         reloadHiddenApps()

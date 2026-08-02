@@ -15,7 +15,6 @@ final class TaskbarPanelController {
     private var revealedIDs: Set<ObjectIdentifier> = []
 
     private let peekHeight: CGFloat = 2
-    private let hotZoneWhenHidden: CGFloat = 8
     private let hideDelay: TimeInterval = 0.45
     private let animationDuration: TimeInterval = 0.18
 
@@ -216,7 +215,9 @@ final class TaskbarPanelController {
         for (id, entry) in panels {
             let height = TaskbarSettings.shared.barHeight
             let revealed = revealedIDs.contains(id)
-            let zoneHeight = revealed ? height + 4 : hotZoneWhenHidden
+            let zoneHeight = revealed
+                ? height + 4
+                : CGFloat(TaskbarSettings.shared.autoHideRevealZone)
             let hotZone = NSRect(
                 x: entry.screen.frame.minX,
                 y: entry.screen.frame.minY,

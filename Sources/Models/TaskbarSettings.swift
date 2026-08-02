@@ -133,6 +133,7 @@ final class TaskbarSettings {
         static let buttonStyle = "taskbarButtonStyle"
         static let replaceDock = "replaceDock"
         static let autoHideTaskbar = "autoHideTaskbar"
+        static let autoHideRevealZone = "autoHideRevealZone"
         static let pinnedBundleIDs = "pinnedBundleIDs"
         static let hiddenBundleIDs = "hiddenBundleIDs"
         static let taskbarOrder = "taskbarOrder"
@@ -184,6 +185,25 @@ final class TaskbarSettings {
         set {
             defaults.set(newValue, forKey: Key.autoHideTaskbar)
             NotificationCenter.default.post(name: .taskbarSettingsChanged, object: nil)
+        }
+    }
+
+    /// Pixel height of the bottom-edge hotspot that reveals an auto-hidden taskbar.
+    /// `1` requires the pointer to touch the screen edge; larger values add a buffer.
+    static let autoHideRevealZoneRange: ClosedRange<Int> = 1...24
+    static let autoHideRevealZoneDefault = 8
+
+    var autoHideRevealZone: Int {
+        get {
+            guard defaults.object(forKey: Key.autoHideRevealZone) != nil else {
+                return Self.autoHideRevealZoneDefault
+            }
+            let raw = defaults.integer(forKey: Key.autoHideRevealZone)
+            return min(max(raw, Self.autoHideRevealZoneRange.lowerBound), Self.autoHideRevealZoneRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.autoHideRevealZoneRange.lowerBound), Self.autoHideRevealZoneRange.upperBound)
+            defaults.set(clamped, forKey: Key.autoHideRevealZone)
         }
     }
 
