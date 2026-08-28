@@ -1,23 +1,9 @@
 import AppKit
 
 /// Taskbar Downloads button — opens a Finder-like list you can drag files out of.
-final class DownloadsButtonView: NSView {
-    var onToggle: (() -> Void)?
-    var isOpen = false {
-        didSet { refreshAppearance() }
-    }
-
-    private let iconView = NSImageView()
-    private var tracking: NSTrackingArea?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        toolTip = "Downloads"
-
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
+final class DownloadsButtonView: TrayItemButtonView {
+    init() {
+        super.init(title: "Downloads")
 
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         if let downloads {
@@ -25,50 +11,9 @@ final class DownloadsButtonView: NSView {
         } else {
             iconView.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Downloads")
         }
-
-        NSLayoutConstraint.activate([
-            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 22),
-            iconView.heightAnchor.constraint(equalToConstant: 22)
-        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    private func refreshAppearance() {
-        if isOpen {
-            layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
-        } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let tracking { removeTrackingArea(tracking) }
-        tracking = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(tracking!)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        if !isOpen {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        refreshAppearance()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onToggle?()
-    }
 }
 
 /// Borderless panels refuse key status by default — search needs a key window.
@@ -115,6 +60,7 @@ final class DownloadsPanelController {
 
     private func show(relativeTo view: NSView) {
         TrashPanelController.shared.hide()
+        CalendarPanelController.shared.hide()
         hide()
         guard let window = view.window else { return }
 
@@ -616,7 +562,9 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
             }
         }
 
-        let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - 24
+        // Everything right-aligned is inset by the scroller gutter — see PanelMetrics.
+        let gutter = PanelMetrics.scrollerGutter
+        let nameWidth = width - 56 - gutter - (entry.isDirectory ? 18 : 0) - 24
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = NSFont.systemFont(ofSize: 13)
         name.textColor = .labelColor
@@ -625,7 +573,7 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
         addSubview(name)
 
         if entry.isDirectory {
-            let chevron = NSImageView(frame: NSRect(x: width - 48, y: 13, width: 14, height: 14))
+            let chevron = NSImageView(frame: NSRect(x: width - 48 - gutter, y: 13, width: 14, height: 14))
             chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Open folder")
             chevron.contentTintColor = .tertiaryLabelColor
             chevron.imageScaling = .scaleProportionallyUpOrDown
@@ -639,7 +587,7 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
         deleteButton.isHidden = true
-        deleteButton.frame = NSRect(x: width - 26, y: 9, width: 22, height: 22)
+        deleteButton.frame = NSRect(x: width - 26 - gutter, y: 9, width: 22, height: 22)
         addSubview(deleteButton)
 
         heightAnchor.constraint(equalToConstant: 40).isActive = true

@@ -1,73 +1,33 @@
 import AppKit
 
 /// Taskbar Trash button — browse, restore, or empty the Trash without opening Finder.
-final class TrashButtonView: NSView {
-    var onToggle: (() -> Void)?
-    var isOpen = false {
-        didSet { refreshAppearance() }
-    }
-
-    private let iconView = NSImageView()
-    private var tracking: NSTrackingArea?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        toolTip = "Trash"
-
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
+final class TrashButtonView: TrayItemButtonView {
+    init() {
+        super.init(title: "Trash")
         refreshIcon()
-
-        NSLayoutConstraint.activate([
-            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 22),
-            iconView.heightAnchor.constraint(equalToConstant: 22)
-        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The Finder-provided icon reflects full/empty state automatically.
-    func refreshIcon() {
-        iconView.image = NSWorkspace.shared.icon(forFile: TrashPanelView.trashRootURL().path)
+    /// The system trash can, empty or full to match the real Trash.
+    ///
+    /// `NSWorkspace.icon(forFile:)` on ~/.Trash returns a generic folder icon, not a
+    /// trash can, so the named system images are used instead — they are the same
+    /// artwork the Dock uses.
+    override func refreshIcon() {
+        let name = Self.isTrashEmpty() ? NSImage.trashEmptyName : NSImage.trashFullName
+        iconView.image = NSImage(named: name)
     }
 
-    private func refreshAppearance() {
-        if isOpen {
-            layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
-        } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let tracking { removeTrackingArea(tracking) }
-        tracking = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
+    private static func isTrashEmpty() -> Bool {
+        let contents = try? FileManager.default.contentsOfDirectory(
+            at: TrashPanelView.trashRootURL(),
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
         )
-        addTrackingArea(tracking!)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        refreshIcon()
-        if !isOpen {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        refreshAppearance()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onToggle?()
+        // Unreadable Trash reads as empty: showing a full can for a folder we cannot
+        // enumerate would be a permanent false positive.
+        return contents?.isEmpty ?? true
     }
 }
 
@@ -115,6 +75,7 @@ final class TrashPanelController {
 
     private func show(relativeTo view: NSView) {
         DownloadsPanelController.shared.hide()
+        CalendarPanelController.shared.hide()
         hide()
         guard let window = view.window else { return }
 
@@ -753,7 +714,9 @@ private final class TrashFileRow: NSView, NSDraggingSource {
             }
         }
 
-        let nameWidth = width - 56 - (entry.isDirectory ? 18 : 0) - (allowsRestore ? 24 : 0)
+        // Everything right-aligned is inset by the scroller gutter — see PanelMetrics.
+        let gutter = PanelMetrics.scrollerGutter
+        let nameWidth = width - 56 - gutter - (entry.isDirectory ? 18 : 0) - (allowsRestore ? 24 : 0)
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = NSFont.systemFont(ofSize: 13)
         name.textColor = .labelColor
@@ -762,7 +725,7 @@ private final class TrashFileRow: NSView, NSDraggingSource {
         addSubview(name)
 
         if entry.isDirectory {
-            let chevron = NSImageView(frame: NSRect(x: width - 48, y: 13, width: 14, height: 14))
+            let chevron = NSImageView(frame: NSRect(x: width - 48 - gutter, y: 13, width: 14, height: 14))
             chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Open folder")
             chevron.contentTintColor = .tertiaryLabelColor
             chevron.imageScaling = .scaleProportionallyUpOrDown
@@ -777,7 +740,7 @@ private final class TrashFileRow: NSView, NSDraggingSource {
             restoreButton.target = self
             restoreButton.action = #selector(restoreTapped)
             restoreButton.isHidden = true
-            restoreButton.frame = NSRect(x: width - 26, y: 9, width: 22, height: 22)
+            restoreButton.frame = NSRect(x: width - 26 - gutter, y: 9, width: 22, height: 22)
             addSubview(restoreButton)
         }
 

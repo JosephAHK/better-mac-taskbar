@@ -5,9 +5,7 @@ final class TrayView: NSView {
 
     private let downloadsButton = DownloadsButtonView()
     private let trashButton = TrashButtonView()
-    private let clockButton = NSButton()
-    private let timeLabel = NSTextField(labelWithString: "")
-    private let dateLabel = NSTextField(labelWithString: "")
+    private let clockButton = ClockButtonView()
     private let showDesktop = ShowDesktopButtonView()
     private var clockTimer: Timer?
 
@@ -51,31 +49,13 @@ final class TrayView: NSView {
 
         let downloadsDivider = makeDivider()
 
-        timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        timeLabel.textColor = .labelColor
-        timeLabel.alignment = .right
-        dateLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        dateLabel.textColor = .labelColor
-        dateLabel.alignment = .right
-
-        let clockStack = NSStackView(views: [timeLabel, dateLabel])
-        clockStack.orientation = .vertical
-        clockStack.spacing = 0
-        clockStack.alignment = .trailing
-
-        clockButton.title = ""
-        clockButton.bezelStyle = .inline
-        clockButton.isBordered = false
-        clockButton.target = self
-        clockButton.action = #selector(openDateTime)
-        clockButton.addSubview(clockStack)
         clockButton.translatesAutoresizingMaskIntoConstraints = false
-        clockStack.translatesAutoresizingMaskIntoConstraints = false
+        clockButton.onToggle = { [weak self] in
+            guard let self else { return }
+            CalendarPanelController.shared.toggle(relativeTo: self.clockButton)
+        }
         NSLayoutConstraint.activate([
-            clockButton.heightAnchor.constraint(equalToConstant: TaskbarSettings.barHeight),
-            clockStack.centerYAnchor.constraint(equalTo: clockButton.centerYAnchor),
-            clockStack.trailingAnchor.constraint(equalTo: clockButton.trailingAnchor, constant: -10),
-            clockStack.leadingAnchor.constraint(equalTo: clockButton.leadingAnchor, constant: 10)
+            clockButton.heightAnchor.constraint(equalToConstant: TaskbarSettings.barHeight)
         ])
 
         showDesktop.onClick = { [weak self] in
@@ -95,10 +75,9 @@ final class TrayView: NSView {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            downloadsButton.widthAnchor.constraint(equalTo: heightAnchor),
+            // Width is intrinsic now that these carry labels — pinning them square
+            // would clip the text.
             downloadsButton.heightAnchor.constraint(equalTo: heightAnchor),
-
-            trashButton.widthAnchor.constraint(equalTo: heightAnchor),
             trashButton.heightAnchor.constraint(equalTo: heightAnchor),
 
             showDesktop.widthAnchor.constraint(equalToConstant: 14),
@@ -126,13 +105,113 @@ final class TrayView: NSView {
     }
 
     private func tick() {
-        let now = Date()
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "h:mm a"
-        let dateFmt = DateFormatter()
-        dateFmt.dateFormat = "M/d/yyyy"
-        timeLabel.stringValue = timeFmt.string(from: now)
-        dateLabel.stringValue = dateFmt.string(from: now)
+        clockButton.update(with: Date())
+    }
+}
+
+/// Taskbar clock — two stacked lines, opens the calendar flyout on click.
+///
+/// A custom view rather than an NSButton so it can carry the same hover and
+/// open-state tint as the other tray flyout buttons.
+final class ClockButtonView: NSView {
+    var onToggle: (() -> Void)?
+
+    var isOpen = false {
+        didSet { refreshAppearance() }
+    }
+
+    private let timeLabel = NSTextField(labelWithString: "")
+    private let dateLabel = NSTextField(labelWithString: "")
+    private var tracking: NSTrackingArea?
+
+    /// Held as instance state: DateFormatter construction is not cheap and this
+    /// formats twice a second, every second, for the life of the process.
+    private let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm:ss a"
+        return formatter
+    }()
+
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M/d/yyyy"
+        return formatter
+    }()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        toolTip = "Click for calendar"
+
+        // Monospaced digits keep the bar from shifting as the seconds tick over.
+        timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        timeLabel.textColor = .labelColor
+        timeLabel.alignment = .right
+        dateLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        dateLabel.textColor = .labelColor
+        dateLabel.alignment = .right
+
+        let clockStack = NSStackView(views: [timeLabel, dateLabel])
+        clockStack.orientation = .vertical
+        clockStack.spacing = 0
+        clockStack.alignment = .trailing
+        clockStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(clockStack)
+
+        NSLayoutConstraint.activate([
+            clockStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            clockStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            clockStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(with date: Date) {
+        timeLabel.stringValue = timeFormatter.string(from: date)
+        dateLabel.stringValue = dateFormatter.string(from: date)
+    }
+
+    private func refreshAppearance() {
+        if isOpen {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        tracking = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(tracking!)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if !isOpen {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        refreshAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onToggle?()
+    }
+
+    /// Right-click still reaches Date & Time settings, which the left click used to do.
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Date & Time Settings…", action: #selector(openDateTime), keyEquivalent: "")
+        menu.items.forEach { $0.target = self }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
     @objc private func openDateTime() {
