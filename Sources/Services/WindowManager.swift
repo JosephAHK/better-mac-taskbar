@@ -92,6 +92,7 @@ final class WindowManager {
     /// Focus a specific window. Uses AX when available; otherwise AppleScript by
     /// window title (CG z-order indices do not track Chrome's real front window).
     func activateWindow(_ info: WindowInfo) {
+        WindowDiagnostics.noteClick(info)
         noteActivated(id: info.id)
         // Block Chrome title AppleScript during grace — it activates this app and flashes.
         suppressScriptedTitlesUntil = Date().addingTimeInterval(activationGrace + 0.4)
@@ -373,6 +374,13 @@ final class WindowManager {
         }
 
         guard let bundleID = info.bundleID else {
+            WindowDiagnostics.noteRaiseResult(
+                info,
+                axResolved: liveMatch != nil,
+                axRestored: axRestored,
+                realWindows: countRealWindows(pid: info.pid),
+                path: "forceShowApp/noBundleID"
+            )
             AccessibilityService.forceShowApp(pid: info.pid, bundleID: nil)
             return
         }
@@ -390,6 +398,18 @@ final class WindowManager {
         // Skip reopen when a window already exists — avoids spawning extras in Electron.
         let needsLSReopen = !axRestored
             && (wasHidden || info.isMinimized || realWindows == 0)
+
+        // A click that resolves no AX window and finds no real window is the signature
+        // of a ghost button: nothing below can possibly bring anything forward. Logged
+        // as WARN by noteRaiseResult so it stands out from ordinary raises.
+        WindowDiagnostics.noteRaiseResult(
+            info,
+            axResolved: liveMatch != nil,
+            axRestored: axRestored,
+            realWindows: realWindows,
+            path: needsLSReopen ? "launchServicesReopen"
+                : stillNotFront ? "activate" : "alreadyFront"
+        )
 
         if needsLSReopen {
             ensureFrontmostViaLaunchServices(bundleID: bundleID)
@@ -617,6 +637,7 @@ final class WindowManager {
 
         if next != windows {
             windows = next
+            WindowDiagnostics.noteWindowSet(next)
             NotificationCenter.default.post(name: .windowsUpdated, object: nil)
         }
     }
@@ -825,9 +846,11 @@ final class WindowManager {
 
     private func enumerateViaAccessibility() -> [WindowInfo] {
         let cgIndex = buildCGIndex()
+        let pidsWithCGWindows = Set(cgIndex.map { $0.pid })
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         var usedIDs = Set<String>()
         var usedCGIDs = Set<CGWindowID>()
+        var drops: [WindowDrop] = []
         // Defer isActive until we know each PID's live front window.
         var pending: [(info: WindowInfo, ax: AXUIElement)] = []
 
@@ -857,6 +880,38 @@ final class WindowManager {
                 // Skip tiny / offscreen utility that slipped through.
                 // Minimized windows can report tiny Dock frames — keep them.
                 if let frame, frame.width < 80 || frame.height < 80, !minimized {
+                    drops.append(WindowDrop(
+                        pid: pid,
+                        appName: app.localizedName ?? app.bundleIdentifier ?? "App",
+                        axIndex: index,
+                        title: title,
+                        frame: frame,
+                        reason: "tinyFrame"
+                    ))
+                    continue
+                }
+
+                // Ghost-window guard. A real window that is not minimized always has a
+                // layer-0 CG counterpart — buildCGIndex uses `.optionAll`, so windows on
+                // other Spaces are included too. An AX window with no CG entry anywhere
+                // for its whole PID therefore does not exist on screen, and the task
+                // button built from it can never be raised (Finder keeps exactly such a
+                // phantom entry when it has no open windows).
+                //
+                // The check is deliberately scoped to PIDs with *no* CG windows at all
+                // rather than to a per-window match failure: matchCGWindow can legitimately
+                // fail to pair a real window (blank CG titles without Screen Recording,
+                // frames drifting mid-animation), and dropping a real sibling window would
+                // be a far worse regression than tolerating a ghost next to a real one.
+                if matchedCG == nil, !minimized, !pidsWithCGWindows.contains(pid) {
+                    drops.append(WindowDrop(
+                        pid: pid,
+                        appName: app.localizedName ?? app.bundleIdentifier ?? "App",
+                        axIndex: index,
+                        title: title,
+                        frame: frame,
+                        reason: "ghostNoCGWindowForPID"
+                    ))
                     continue
                 }
 
@@ -889,6 +944,8 @@ final class WindowManager {
                 pending.append((info, ax))
             }
         }
+
+        WindowDiagnostics.noteDrops(drops)
 
         // Resolve which window is active using live AX focused/main window.
         var activeID: String?

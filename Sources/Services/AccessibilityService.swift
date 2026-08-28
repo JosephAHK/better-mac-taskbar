@@ -30,6 +30,15 @@ enum AccessibilityService {
     }
 
     static func isStandardWindow(_ element: AXUIElement) -> Bool {
+        // Role first. kAXWindowsAttribute is not guaranteed to contain only windows:
+        // Finder publishes its desktop there as a full-screen AXScrollArea with an
+        // empty subrole, which slipped past the subrole check below and produced a
+        // permanent Finder task button that no click could ever raise.
+        if let role = stringValue(element, kAXRoleAttribute as CFString),
+           role != kAXWindowRole as String {
+            return false
+        }
+
         if let subrole = stringValue(element, kAXSubroleAttribute as CFString),
            !subrole.isEmpty {
             let allowed: Set<String> = [
@@ -666,7 +675,9 @@ enum AccessibilityService {
 
     // MARK: - Helpers
 
-    private static func stringValue(_ element: AXUIElement, _ attribute: CFString) -> String? {
+    /// Internal rather than private so WindowDiagnostics can report raw role/subrole
+    /// attributes in its snapshot without duplicating the AX plumbing.
+    static func stringValue(_ element: AXUIElement, _ attribute: CFString) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
         return value as? String

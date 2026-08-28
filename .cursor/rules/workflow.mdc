@@ -1,0 +1,38 @@
+---
+description: Mandatory build/restart/push workflow for every code change in Better Mac Taskbar
+alwaysApply: true
+---
+
+# Workflow
+
+Every change to code must end with all three steps done. A change that is built but not restarted is not testable; a change that is restarted but not pushed is not saved.
+
+## 1. Rebuild
+
+```bash
+./build.sh
+```
+
+Compiles all of `Sources/**/*.swift` (no package manifest — new files need no registration), bundles, codesigns, and installs to `~/Applications/Better Mac Taskbar.app`. Any `error:` in the output is blocking.
+
+## 2. Restart the running app
+
+```bash
+pkill -x BetterMacTaskbar; sleep 1; open ~/Applications/"Better Mac Taskbar.app"
+```
+
+`open` on its own just focuses the already-running process and the new binary never loads. The old process must die first.
+
+## 3. Commit and push to the default branch
+
+```bash
+git add -A && git commit -m "..." && git push origin main
+```
+
+The default branch is **`main`** (there is no `master`). Do not leave finished work uncommitted, and do not create a side branch for ordinary changes.
+
+## Notes
+
+- Claude Code runs steps 1 and 2 automatically via a `Stop` hook (`.claude/hooks/rebuild-restart.sh`) when sources are newer than the built binary. It never commits or pushes — step 3 is always explicit.
+- SourceKit shows `Cannot find type 'WindowInfo' in scope` and similar across most files because there is no package manifest defining the module. **These are false positives.** `./build.sh` is the only authority on whether the code compiles.
+- Verify user-visible changes against the running app, not just by reading the code. For the window layer use `./scripts/bmt-log snap` (see `app-logs.mdc`).

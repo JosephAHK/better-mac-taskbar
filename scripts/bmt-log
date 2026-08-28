@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Live view onto Better Mac Taskbar's window layer.
+#
+#   bmt-log tail       follow the log, window/click events only (default)
+#   bmt-log all        follow the log, everything
+#   bmt-log snap       dump a full window snapshot into the log and print it
+#   bmt-log verbose    turn DEBUG logging on, then restart the app
+#   bmt-log quiet      turn DEBUG logging off, then restart the app
+#   bmt-log status     is it running, what level, where is the log
+set -uo pipefail
+
+LOG="$HOME/Library/Logs/BetterMacTaskbar/app.log"
+DOMAIN="com.bettermac.taskbar"
+APP="/Users/joseph.raggiunti/Desktop/Better Mac Taskbar/build/Better Mac Taskbar.app"
+
+# Signal-vs-log race: SIGUSR1 handling is async on the main queue, so the dump is
+# not on disk the instant kill returns. Mark the byte offset first, then poll for
+# the terminating line rather than sleeping a fixed guess.
+snapshot() {
+  local pid start deadline
+  pid="$(pgrep -x BetterMacTaskbar | head -1)"
+  if [[ -z "$pid" ]]; then
+    echo "BetterMacTaskbar is not running." >&2
+    exit 1
+  fi
+  start=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+  kill -USR1 "$pid"
+  deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    if tail -c "+$((start + 1))" "$LOG" 2>/dev/null | grep -q 'window snapshot end'; then
+      tail -c "+$((start + 1))" "$LOG"
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Timed out waiting for the snapshot. Partial output:" >&2
+  tail -c "+$((start + 1))" "$LOG"
+  return 1
+}
+
+restart() {
+  pkill -x BetterMacTaskbar 2>/dev/null
+  sleep 1
+  open "$APP"
+}
+
+case "${1:-tail}" in
+  tail)
+    echo "Following $LOG (window + click events). Ctrl-C to stop."
+    # --line-buffered on both, otherwise grep holds a 4K block and the "live"
+    # view arrives in bursts minutes late.
+    tail -n 0 -F "$LOG" | grep --line-buffered -E \
+      'window|snapshot|click|raise|WARN|ERROR'
+    ;;
+  all)
+    echo "Following $LOG (everything). Ctrl-C to stop."
+    tail -n 0 -F "$LOG"
+    ;;
+  snap)
+    snapshot
+    ;;
+  verbose)
+    defaults write "$DOMAIN" verboseLogging -bool YES
+    echo "DEBUG logging enabled. Restarting..."
+    restart
+    ;;
+  quiet)
+    defaults write "$DOMAIN" verboseLogging -bool NO
+    echo "DEBUG logging disabled. Restarting..."
+    restart
+    ;;
+  status)
+    if pgrep -x BetterMacTaskbar >/dev/null; then
+      echo "running  pid=$(pgrep -x BetterMacTaskbar | tr '\n' ' ')"
+    else
+      echo "not running"
+    fi
+    echo "verboseLogging=$(defaults read "$DOMAIN" verboseLogging 2>/dev/null || echo 0)"
+    echo "log=$LOG"
+    grep -E 'bootstrap' "$LOG" 2>/dev/null | tail -1
+    ;;
+  *)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

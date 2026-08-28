@@ -6,12 +6,38 @@ import Darwin
 /// Primary log: `~/Library/Logs/BetterMacTaskbar/app.log`
 /// Rotated backup: `~/Library/Logs/BetterMacTaskbar/app.1.log`
 enum AppLog {
-    enum Level: String {
+    enum Level: String, Comparable {
         case debug = "DEBUG"
         case info = "INFO"
         case warn = "WARN"
         case error = "ERROR"
+
+        var severity: Int {
+            switch self {
+            case .debug: return 0
+            case .info: return 1
+            case .warn: return 2
+            case .error: return 3
+            }
+        }
+
+        static func < (lhs: Level, rhs: Level) -> Bool {
+            lhs.severity < rhs.severity
+        }
     }
+
+    /// Lines below this level are discarded. DEBUG is opt-in so verbose window
+    /// tracing can be switched on for a diagnosis session without permanently
+    /// paying the log volume.
+    ///
+    /// Enable with either:
+    ///   defaults write com.bettermac.taskbar verboseLogging -bool YES   (persists)
+    ///   BMT_VERBOSE_LOG=1                                              (one launch)
+    static var minimumLevel: Level = {
+        if ProcessInfo.processInfo.environment["BMT_VERBOSE_LOG"] == "1" { return .debug }
+        if UserDefaults.standard.bool(forKey: "verboseLogging") { return .debug }
+        return .info
+    }()
 
     static let directoryURL: URL = {
         FileManager.default.homeDirectoryForCurrentUser
@@ -23,7 +49,8 @@ enum AppLog {
     static let fileURL: URL = directoryURL.appendingPathComponent("app.log", isDirectory: false)
 
     private static let queue = DispatchQueue(label: "com.bettermac.taskbar.applog")
-    private static let maxFileBytes: UInt64 = 2 * 1024 * 1024
+    private static let maxFileBytes: UInt64 = 8 * 1024 * 1024
+    private static let heartbeatInterval: TimeInterval = 300
     private static var heartbeatTimer: DispatchSourceTimer?
     private static var started = false
 
@@ -45,9 +72,11 @@ enum AppLog {
             "pid": pid,
             "version": version,
             "bundlePath": path,
-            "logFile": fileURL.path
+            "logFile": fileURL.path,
+            "logLevel": minimumLevel.rawValue
         ])
         startHeartbeat()
+        WindowDiagnostics.installSnapshotSignalHandler()
     }
 
     static func debug(_ message: String, _ fields: [String: Any] = [:]) {
@@ -75,7 +104,8 @@ enum AppLog {
 
     // MARK: - Internals
 
-    private static func write(_ level: Level, _ message: String, _ fields: [String: Any]) {
+    static func write(_ level: Level, _ message: String, _ fields: [String: Any] = [:]) {
+        guard level >= minimumLevel else { return }
         let ts = isoTimestamp()
         let pid = ProcessInfo.processInfo.processIdentifier
         var line = "\(ts) [\(level.rawValue)] pid=\(pid) \(message)"
@@ -131,9 +161,15 @@ enum AppLog {
 
     private static func startHeartbeat() {
         stopHeartbeat()
+        // 5 minutes, not 60s. The heartbeat only needs to prove liveness and
+        // bracket the time of an unlogged death; at 60s it was ~99% of the log
+        // and pushed real events out of the rotation window.
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 60, repeating: 60)
+        timer.schedule(deadline: .now() + heartbeatInterval, repeating: heartbeatInterval)
         timer.setEventHandler {
+            // Deliberately not level-gated: the heartbeat is what brackets the time
+            // of a death that never got to log anything, so it has to survive at the
+            // default level.
             let ts = isoTimestamp()
             let pid = ProcessInfo.processInfo.processIdentifier
             let uptime = Int(ProcessInfo.processInfo.systemUptime)

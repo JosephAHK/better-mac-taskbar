@@ -10,19 +10,42 @@ When the taskbar disappears, won't start, or "stopped", **read the app log first
 ## Location
 
 - **Primary:** `~/Library/Logs/BetterMacTaskbar/app.log`
-- **Rotated backup (when primary exceeds ~2MB):** `~/Library/Logs/BetterMacTaskbar/app.1.log`
+- **Rotated backup (when primary exceeds 8MB):** `~/Library/Logs/BetterMacTaskbar/app.1.log`
 
 ```bash
 tail -n 80 ~/Library/Logs/BetterMacTaskbar/app.log
 pgrep -fl BetterMacTaskbar
 ```
 
+## Live view: `scripts/bmt-log`
+
+Prefer this over raw `tail`.
+
+```bash
+./scripts/bmt-log status    # running? what level? where's the log?
+./scripts/bmt-log tail      # live follow, window/click/raise/WARN/ERROR only
+./scripts/bmt-log all       # live follow, everything
+./scripts/bmt-log snap      # full snapshot of every AX + CG window, right now
+./scripts/bmt-log verbose   # enable DEBUG logging, restart
+./scripts/bmt-log quiet     # back to INFO, restart
+```
+
+`snap` (equivalently `kill -USR1 <pid>`) is the ground truth for **"why is there a taskbar button for an app with no windows"** or **"why is this window missing from the taskbar"**. It logs:
+
+- every AX window per app — `role`, `subrole`, `title`, `frame`, `minimized`, and the `passesStandardWindow` verdict
+- every layer-0 CG window — `size`, `alpha`, `onScreen`, plus `indexed=` and `rejectedBy=` showing how `buildCGIndex` judged it
+
+An app whose only AX window has `passesStandardWindow=false`, or whose windows are all `indexed=false`, is the ghost-window signature.
+
 ## What to look for
 
 | Line | Meaning |
 |------|---------|
 | `bootstrap` / `application ready` | App launched successfully |
-| `heartbeat` (every ~60s) | Process was still alive |
+| `heartbeat` (every 5 min) | Process was still alive |
+| `window set changed` | The enumerated window set transitioned — logged on change only |
+| `window dropped` | A window was rejected from the taskbar, with `reason=` |
+| `raise result` | Outcome of a click; `WARN` means nothing could be brought forward |
 | `caughtSignal signal=SIGTERM` | Killed by `pkill` / quit signal (rebuild scripts do this) |
 | `shutdown` / `applicationWillTerminate` | Clean quit (Start menu / status menu Quit) |
 | `uncaughtException` | Swift/ObjC exception crash |
@@ -37,6 +60,11 @@ Use `AppLog` (`Sources/Services/AppLog.swift`):
 ```swift
 AppLog.info("something happened", ["key": value])
 AppLog.error("failed", ["error": message])
+AppLog.debug("noisy detail", ["key": value])   // discarded unless DEBUG is enabled
 ```
+
+`DEBUG` is gated behind `AppLog.minimumLevel` (default `INFO`). Enable it with `./scripts/bmt-log verbose`, `defaults write com.bettermac.taskbar verboseLogging -bool YES`, or `BMT_VERBOSE_LOG=1` for a single launch.
+
+**Keep hot-path logging change-gated.** `WindowManager.refresh()` runs on a poll timer *and* on every AX window event, so anything logged unconditionally per pass buries the log within minutes — the old 60s heartbeat alone was ~99% of the file. Route per-refresh logging through `WindowDiagnostics`, which logs only transitions, and put exhaustive detail in the on-demand snapshot instead.
 
 Do **not** write debug/agent logs under `.cursor/debug-*.log` for production diagnosis — use `AppLog`.

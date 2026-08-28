@@ -18,7 +18,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Optional Dock replacement (Dock fully hidden while running; restored on quit)
 - Optional auto-hide taskbar
 - Launch at login
-- App log file for diagnosing unexpected quits (`~/Library/Logs/BetterMacTaskbar/app.log`)
+- App log file for diagnosing unexpected quits (`~/Library/Logs/BetterMacTaskbar/app.log`), plus `scripts/bmt-log` for a live view and on-demand window snapshots
 
 ## Requirements
 
