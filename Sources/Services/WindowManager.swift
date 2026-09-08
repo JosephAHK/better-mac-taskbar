@@ -852,7 +852,7 @@ final class WindowManager {
         var usedCGIDs = Set<CGWindowID>()
         var drops: [WindowDrop] = []
         // Defer isActive until we know each PID's live front window.
-        var pending: [(info: WindowInfo, ax: AXUIElement)] = []
+        var pending: [(info: WindowInfo, ax: AXUIElement, frame: CGRect?, axIndex: Int)] = []
 
         let apps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && !$0.isTerminated }
@@ -941,9 +941,11 @@ final class WindowManager {
                     isActive: false,
                     axElement: ax
                 )
-                pending.append((info, ax))
+                pending.append((info, ax, frame, index))
             }
         }
+
+        collapseTabGroupSiblings(&pending, drops: &drops)
 
         WindowDiagnostics.noteDrops(drops)
 
@@ -986,6 +988,72 @@ final class WindowManager {
                 axElement: entry.info.axElement
             )
         }
+    }
+
+    /// Collapse the extra task buttons a minimized macOS native tab group produces.
+    ///
+    /// Apps that use NSWindow tabbing (Ghostty, Terminal, Finder…) back every tab with a
+    /// real NSWindow. While the group is on screen `kAXWindowsAttribute` publishes only
+    /// the selected tab, so a one-window / three-tab terminal correctly yields one
+    /// button. Minimizing the group miniaturizes each member individually and *all* of
+    /// them then appear in the AX list — full-size frames, role AXWindow, subrole
+    /// AXStandardWindow, minimized — so the taskbar grew three buttons for one window
+    /// and collapsed back to one the instant it was restored.
+    ///
+    /// Tab-group members are co-located by definition, so identical pid + frame marks
+    /// the group. Frame alone is *not* enough to act on: two independently minimized
+    /// maximized windows legitimately share a frame, and hiding a real window is a far
+    /// worse bug than tolerating an extra button (same doctrine as the ghost-window
+    /// guard above). So a sibling is only dropped when it just appeared *and* an entry
+    /// already on the taskbar holds its frame — exactly the minimize-time unmasking.
+    /// Two separately minimized windows were both in the AX list beforehand, so both
+    /// are known and neither is dropped.
+    ///
+    /// Consequence worth knowing: if the app starts with a tab group already minimized
+    /// nothing is known yet, so the extra buttons show until the group is restored once.
+    /// That is the deliberate direction to err in.
+    private func collapseTabGroupSiblings(
+        _ pending: inout [(info: WindowInfo, ax: AXUIElement, frame: CGRect?, axIndex: Int)],
+        drops: inout [WindowDrop]
+    ) {
+        guard !pending.isEmpty else { return }
+
+        let knownIDs = Set(windows.map(\.id))
+        guard !knownIDs.isEmpty else { return }
+
+        func frameKey(_ pid: pid_t, _ frame: CGRect) -> String {
+            "\(pid)/\(Int(frame.origin.x))/\(Int(frame.origin.y))/\(Int(frame.width))/\(Int(frame.height))"
+        }
+
+        // Frames held by an entry the taskbar already shows. Only those can absorb a
+        // newly appeared sibling.
+        var claimedFrames = Set<String>()
+        for entry in pending where entry.info.isMinimized && knownIDs.contains(entry.info.id) {
+            if let frame = entry.frame {
+                claimedFrames.insert(frameKey(entry.info.pid, frame))
+            }
+        }
+        guard !claimedFrames.isEmpty else { return }
+
+        var droppedIDs = Set<String>()
+        for entry in pending {
+            guard entry.info.isMinimized,
+                  !knownIDs.contains(entry.info.id),
+                  let frame = entry.frame,
+                  claimedFrames.contains(frameKey(entry.info.pid, frame)) else { continue }
+            droppedIDs.insert(entry.info.id)
+            drops.append(WindowDrop(
+                pid: entry.info.pid,
+                appName: entry.info.appName,
+                axIndex: entry.axIndex,
+                title: entry.info.title,
+                frame: frame,
+                reason: "tabGroupSibling"
+            ))
+        }
+
+        guard !droppedIDs.isEmpty else { return }
+        pending.removeAll { droppedIDs.contains($0.info.id) }
     }
 
     private func enumerateViaCGFallback() -> [WindowInfo] {
