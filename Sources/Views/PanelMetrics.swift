@@ -1,7 +1,10 @@
 import AppKit
 
-/// Layout constants shared by the tray flyout panels (Downloads, Trash).
+/// Layout constants shared by the tray flyout panels (Downloads, Trash, Calendar).
 enum PanelMetrics {
+    /// Gap between a flyout and the screen edge / the top of the taskbar.
+    static let flyoutEdgeGutter: CGFloat = 6
+
     /// Horizontal strip at a scrolling row's trailing edge that must stay free of
     /// interactive controls.
     ///

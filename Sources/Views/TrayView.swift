@@ -128,7 +128,7 @@ final class ClockButtonView: NSView {
     /// formats twice a second, every second, for the life of the process.
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm:ss a"
+        formatter.dateFormat = "h:mm a"
         return formatter
     }()
 
