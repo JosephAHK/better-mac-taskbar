@@ -10,8 +10,21 @@ CONTENTS="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 
-SDK="$(xcrun --show-sdk-path)"
 MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+
+# Prefer an SDK the installed swiftc can compile against. CLT often points at a
+# newer MacOSX.sdk than the toolchain (e.g. 27.0 vs Swift 6.3).
+SDK="${SDKROOT:-$(xcrun --show-sdk-path)}"
+if [[ "$SDK" == *MacOSX27* ]]; then
+  for candidate in \
+      /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk \
+      /Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk; do
+    if [[ -d "$candidate" ]]; then
+      SDK="$candidate"
+      break
+    fi
+  done
+fi
 
 echo "==> Collecting sources"
 SOURCES=()

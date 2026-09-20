@@ -12,6 +12,11 @@ build/
 *.cer
 *.key
 
+# Packaged installers (upload to GitHub Releases; do not commit binaries)
+releases/*.pkg
+releases/*.dmg
+releases/*.zip
+
 # Cursor agent debug dumps (may contain window titles from your machine)
 .cursor/debug*.log
 .cursor/*.log

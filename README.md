@@ -26,7 +26,20 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Apple Silicon (arm64) — build script targets `arm64-apple-macosx`
 - Xcode Command Line Tools (`xcode-select --install`)
 
-## Build & run
+## Install
+
+**From a GitHub Release** (recommended): download the `.pkg` from [Releases](https://github.com/JosephAHK/better-mac-taskbar/releases), double-click, and follow Installer. Or use the `.dmg` and drag the app into Applications.
+
+**From source:**
+
+```bash
+./package.sh          # builds → releases/
+./package.sh --publish  # tag + upload to GitHub Releases (needs `gh`)
+```
+
+Then open **Better Mac Taskbar** from Applications and grant Accessibility (see below).
+
+## Build & run (dev)
 
 ```bash
 git clone https://github.com/JosephAHK/better-mac-taskbar.git
@@ -64,6 +77,8 @@ Menu bar icon → **Settings…**, or Start → Settings:
 Sources/          Swift / AppKit source
 Resources/        Info.plist, app icon
 build.sh          Compile, package, sign
+package.sh        Build .pkg + .dmg → releases/ (--publish uploads)
+releases/         Local installers (gitignored binaries)
 build/            Generated .app (gitignored)
 ```
 
