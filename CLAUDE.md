@@ -6,12 +6,12 @@ Windows 10-style taskbar for macOS. Native Swift / AppKit accessory app (menu ba
 
 Every turn that changes code must end with all three of these done:
 
-1. **Rebuild** — `./build.sh`. It compiles, bundles, codesigns, and installs to `~/Applications/Better Mac Taskbar.app`. Treat any `error:` in its output as blocking.
+1. **Rebuild** — `./build.sh`. It compiles, bundles, codesigns, and installs to `/Applications/Better Mac Taskbar.app` (`~/Applications` when `/Applications` isn't writable), recording the installed path in `build/.run-app-path`. Treat any `error:` in its output as blocking.
 2. **Restart the running app** — the change is not live until the old process dies:
    ```bash
-   pkill -x BetterMacTaskbar; sleep 1; open ~/Applications/"Better Mac Taskbar.app"
+   pkill -x BetterMacTaskbar; while pgrep -x BetterMacTaskbar >/dev/null; do sleep 0.1; done; open "$(cat build/.run-app-path)"
    ```
-   `open` alone only focuses the already-running process; the new binary never loads.
+   `open` alone only focuses the already-running process; the new binary never loads. SIGTERM is a graceful quit (it restores the Dock first), hence waiting for the exit. Never `open build/Better Mac Taskbar.app` — a second bundle with the same id splits the Accessibility grant.
 3. **Commit and push to the default branch (`main`)** — `git push origin main`. Do not leave finished work sitting uncommitted in the working tree, and do not open a side branch for ordinary changes.
 
 A `Stop` hook (`.claude/hooks/rebuild-restart.sh`) performs 1 and 2 automatically when sources are newer than the built binary. It does **not** commit or push — step 3 is always manual.

@@ -11,7 +11,25 @@ set -uo pipefail
 
 LOG="$HOME/Library/Logs/BetterMacTaskbar/app.log"
 DOMAIN="com.bettermac.taskbar"
-APP="/Users/joseph.raggiunti/Desktop/Better Mac Taskbar/build/Better Mac Taskbar.app"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# The bundle build.sh last installed. Launching any other copy would register a
+# second app with the same bundle id and split its Accessibility grant.
+run_app() {
+  local recorded app
+  recorded="$(cat "$ROOT/build/.run-app-path" 2>/dev/null)"
+  for app in "$recorded" \
+             "/Applications/Better Mac Taskbar.app" \
+             "$HOME/Applications/Better Mac Taskbar.app" \
+             "$ROOT/build/Better Mac Taskbar.app"; do
+    if [[ -n "$app" && -d "$app" ]]; then
+      printf '%s\n' "$app"
+      return 0
+    fi
+  done
+  echo "No built app found — run ./build.sh first." >&2
+  return 1
+}
 
 # Signal-vs-log race: SIGUSR1 handling is async on the main queue, so the dump is
 # not on disk the instant kill returns. Mark the byte offset first, then poll for
@@ -39,9 +57,16 @@ snapshot() {
 }
 
 restart() {
+  local app
+  app="$(run_app)" || exit 1
+  # SIGTERM is a graceful quit that restores the Dock first; `open` while the old
+  # process is still alive would just focus it.
   pkill -x BetterMacTaskbar 2>/dev/null
-  sleep 1
-  open "$APP"
+  for _ in {1..50}; do
+    pgrep -x BetterMacTaskbar >/dev/null || break
+    sleep 0.1
+  done
+  open "$app"
 }
 
 case "${1:-tail}" in
@@ -77,6 +102,7 @@ case "${1:-tail}" in
     fi
     echo "verboseLogging=$(defaults read "$DOMAIN" verboseLogging 2>/dev/null || echo 0)"
     echo "log=$LOG"
+    echo "app=$(run_app 2>&1)"
     grep -E 'bootstrap' "$LOG" 2>/dev/null | tail -1
     ;;
   *)
