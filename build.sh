@@ -52,6 +52,7 @@ swiftc \
   -framework ServiceManagement \
   -framework ImageIO \
   -framework SwiftUI \
+  -framework EventKit \
   -O \
   "${SOURCES[@]}" \
   -o "$MACOS_DIR/$EXEC_NAME"

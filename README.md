@@ -15,6 +15,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Center or left-aligned icons
 - Start menu with pinned apps and type-to-search across installed apps (configurable Start hotkey; default Windows / ⌘ alone unhides the taskbar)
 - Clock, tray, Show Desktop
+- Clock flyout shows Up Next: your next events for the coming week, like the Calendar widget (click one to open it in Calendar)
 - Right-click: Close, Minimize, Pin, Hide, New window, Quit
 - Middle-click closes a window
 - Optional Dock replacement (Dock fully hidden while running; restored on quit)

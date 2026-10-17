@@ -22,6 +22,7 @@ final class CalendarPanelController {
     private var globalMonitor: Any?
     /// Cmd-Tab, Mission Control or another app stealing focus closes the flyout.
     private lazy var focus = FlyoutFocus { [weak self] in
+        guard !UpcomingEvents.shared.isAccessPromptInFront else { return }
         self?.hide(restoringFocus: false)
     }
 
@@ -47,6 +48,7 @@ final class CalendarPanelController {
         let wasVisible = panel != nil
         removeMonitors()
         (panel?.contentView as? CalendarPanelView)?.stopClock()
+        UpcomingEvents.shared.endWatching()
         panel?.orderOut(nil)
         panel = nil
         (anchor as? TrayItemButtonView)?.isOpen = false
@@ -67,6 +69,18 @@ final class CalendarPanelController {
         let content = CalendarPanelView()
         content.onRequestClose = { [weak self] in
             self?.hide()
+        }
+        // Calendar (or System Settings) comes to the front, so focus stays with it.
+        content.onOpenURL = { [weak self] url in
+            self?.hide(restoringFocus: false)
+            if !NSWorkspace.shared.open(url),
+               let calendarApp = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iCal") {
+                NSWorkspace.shared.open(calendarApp)
+            }
+        }
+        content.onHeightChange = { [weak self, weak content] in
+            guard let self, let content else { return }
+            self.refit(content)
         }
         let size = content.fittingSize
         let width = size.width
@@ -116,8 +130,20 @@ final class CalendarPanelController {
         (view as? TrayItemButtonView)?.isOpen = true
         (view as? ClockButtonView)?.isOpen = true
         content.startClock()
+        UpcomingEvents.shared.beginWatching()
         installMonitors()
         TaskbarPanelController.shared.beginKeepVisible()
+    }
+
+    /// Up Next grew or shrank. The panel sits on the bar, so it keeps its bottom
+    /// edge (the frame origin) and grows upward; the width never changes.
+    private func refit(_ content: CalendarPanelView) {
+        guard let panel, panel.contentView === content else { return }
+        let height = content.fittingSize.height
+        var frame = panel.frame
+        guard frame.height != height else { return }
+        frame.size.height = height
+        panel.setFrame(frame, display: true)
     }
 
     private func installMonitors() {
@@ -136,6 +162,8 @@ final class CalendarPanelController {
         }
         // A click in another app activates it; leave focus where the user put it.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            // Answering the Calendar prompt is a click in another process.
+            guard !UpcomingEvents.shared.isAccessPromptInFront else { return }
             self?.hide(restoringFocus: false)
         }
     }
@@ -165,13 +193,18 @@ final class CalendarPanelController {
     }
 }
 
-/// Month grid plus a live clock readout.
+/// Live clock readout, Up Next list, then the month grid.
 final class CalendarPanelView: NSView {
     var onRequestClose: (() -> Void)?
+    /// An Up Next row was clicked; the controller closes the flyout and opens it.
+    var onOpenURL: ((URL) -> Void)?
+    /// Up Next changed height after the panel was sized.
+    var onHeightChange: (() -> Void)?
 
     private let timeLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
     private let monthLabel = NSTextField(labelWithString: "")
+    private let upNext = UpNextView()
     private let grid = NSGridView()
     private var clockTimer: Timer?
     private let effect = NSVisualEffectView()
@@ -298,6 +331,10 @@ final class CalendarPanelView: NSView {
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
 
+        upNext.onOpen = { [weak self] url in self?.onOpenURL?(url) }
+        upNext.onHeightChange = { [weak self] in self?.onHeightChange?() }
+        addSubview(upNext)
+
         monthLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         monthLabel.textColor = .labelColor
         monthLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -324,11 +361,17 @@ final class CalendarPanelView: NSView {
             divider.topAnchor.constraint(equalTo: clockStack.bottomAnchor, constant: 14),
             divider.heightAnchor.constraint(equalToConstant: 1),
 
+            // Between the clock and the month; brings its own bottom divider and
+            // collapses to nothing when empty, so the month row needs no special case.
+            upNext.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset - UpNextView.rowPadding),
+            upNext.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(inset - UpNextView.rowPadding)),
+            upNext.topAnchor.constraint(equalTo: divider.bottomAnchor),
+
             monthLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
             monthLabel.centerYAnchor.constraint(equalTo: prev.centerYAnchor),
 
             next.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(inset - glyphOverhang)),
-            next.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            next.topAnchor.constraint(equalTo: upNext.bottomAnchor, constant: 10),
             next.widthAnchor.constraint(equalToConstant: arrowSize),
             next.heightAnchor.constraint(equalToConstant: arrowSize),
 

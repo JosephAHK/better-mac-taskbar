@@ -34,6 +34,10 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Better Mac Taskbar needs to control apps so clicking a taskbar icon can bring that specific window to the front.</string>
 </dict>

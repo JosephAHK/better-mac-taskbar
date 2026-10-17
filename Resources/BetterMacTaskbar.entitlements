@@ -7,5 +7,9 @@
 	     closing and emptying the Trash. -->
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<!-- Hardened runtime silently denies EventKit without this; the clock
+	     flyout's Up Next list reads upcoming events. -->
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
 </dict>
 </plist>
