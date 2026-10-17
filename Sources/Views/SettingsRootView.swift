@@ -70,6 +70,11 @@ struct SettingsRootView: View {
             .navigationTitle(selection.rawValue)
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onReceive(store.$requestedPage) { page in
+            guard let page else { return }
+            selection = page
+            store.requestedPage = nil
+        }
     }
 
     @ViewBuilder
@@ -230,16 +235,6 @@ private struct GeneralPage: View {
 
             Card(title: "Settings") {
                 Row(
-                    title: "Import or export",
-                    subtitle: "A JSON file with every setting, including pinned apps, hidden apps and taskbar order."
-                ) {
-                    HStack(spacing: 8) {
-                        Button("Import…") { store.importSettings() }
-                        Button("Export…") { store.exportSettings() }
-                    }
-                    .controlSize(.small)
-                }
-                Row(
                     title: "Reset to defaults",
                     subtitle: "Also clears pinned apps, hidden apps and taskbar order. Launch at login is not changed.",
                     isLast: true
@@ -357,7 +352,68 @@ private struct AppearancePage: View {
             }
 
             TaskbarPreview(centered: store.centerIcons)
+
+            Card(title: "Window previews") {
+                Row(
+                    title: "Show window previews",
+                    subtitle: "Hover over a taskbar button to see its window, then click the preview to switch to it.",
+                    isLast: !store.showWindowPreviews
+                ) {
+                    Toggle("", isOn: $store.showWindowPreviews).settingsToggle()
+                }
+                if store.showWindowPreviews {
+                    Row(
+                        title: "Preview delay",
+                        subtitle: "How long to rest the pointer on a button before its preview opens.",
+                        isLast: !showsThumbnailPermissionRow
+                    ) {
+                        let range = TaskbarSettings.windowPreviewDelayRange
+                        AutoHideSliderControl(
+                            valueLabel: String(format: "%.2f s", store.windowPreviewDelay),
+                            isDefault: abs(store.windowPreviewDelay - TaskbarSettings.windowPreviewDelayDefault) < 0.001,
+                            onReset: {
+                                store.windowPreviewDelay = TaskbarSettings.windowPreviewDelayDefault
+                            }
+                        ) {
+                            SettingsSlider(
+                                value: $store.windowPreviewDelay,
+                                range: range.lowerBound...range.upperBound,
+                                tickMarks: 4
+                            )
+                        }
+                    }
+                }
+                if showsThumbnailPermissionRow {
+                    Row(
+                        title: "Thumbnails need Screen Recording",
+                        subtitle: "Without it, previews show the window's title and app icon. After granting, quit and reopen Better Mac Taskbar.",
+                        isLast: true
+                    ) {
+                        ScreenRecordingButtons(store: store)
+                    }
+                }
+            }
         }
+    }
+
+    private var showsThumbnailPermissionRow: Bool {
+        store.showWindowPreviews && store.windowThumbnailsSupported && !store.screenRecordingGranted
+    }
+}
+
+/// "Grant…" asks once through the system prompt; macOS ignores later requests, so
+/// the Privacy Settings link is the way back after a "Don't Allow".
+private struct ScreenRecordingButtons: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("Grant…") { store.requestScreenRecording() }
+                .help("Ask macOS for Screen Recording access")
+            Button("Open Privacy Settings") { store.openScreenRecordingSettings() }
+                .help("Open Privacy & Security → Screen & System Audio Recording")
+        }
+        .controlSize(.small)
     }
 }
 
@@ -619,7 +675,6 @@ private struct ResetDefaultButton: View {
         .buttonStyle(.plain)
         .disabled(isDefault)
         .help("Reset to default")
-        .accessibilityLabel("Reset to default")
     }
 }
 
@@ -694,6 +749,26 @@ private struct PermissionsPage: View {
                         if !store.accessibilityTrusted {
                             Button("Open Settings…") { store.openAccessibilitySettings() }
                                 .controlSize(.small)
+                        }
+                    }
+                }
+            }
+
+            if store.windowThumbnailsSupported {
+                Card(
+                    title: "Screen Recording",
+                    footer: "Optional, and used only for thumbnails of the windows in a preview. macOS may ask you to quit and reopen Better Mac Taskbar after granting."
+                ) {
+                    Row(
+                        title: "Screen Recording access",
+                        subtitle: "Shows a thumbnail of each window in hover previews.",
+                        isLast: store.screenRecordingGranted
+                    ) {
+                        StatusBadge(ok: store.screenRecordingGranted)
+                    }
+                    if !store.screenRecordingGranted {
+                        Row(title: "Allow thumbnails", isLast: true) {
+                            ScreenRecordingButtons(store: store)
                         }
                     }
                 }

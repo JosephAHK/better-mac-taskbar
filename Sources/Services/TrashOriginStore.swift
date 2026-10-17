@@ -119,10 +119,12 @@ enum TrashOriginStore {
         save(map)
     }
 
-    /// Drop every record whose trashed path lives under `root` — called after Empty Trash.
+    /// Drop every record whose trashed path lives under `root` — called after Empty
+    /// Trash. The separator keeps a sibling folder whose name merely starts the same
+    /// way out of it.
     static func removeAll(under root: URL) {
         var map = load()
-        let prefix = root.path
+        let prefix = root.path + "/"
         map = map.filter { !$0.key.hasPrefix(prefix) }
         save(map)
     }

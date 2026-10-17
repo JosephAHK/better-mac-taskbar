@@ -216,9 +216,8 @@ final class CalendarPanelView: NSView {
         addSubview(effect, positioned: .below, relativeTo: nil)
 
         tint.wantsLayer = true
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
         addSubview(tint, positioned: .above, relativeTo: effect)
-        refreshBackground()
-        TaskbarAppearance.addObserver(self, selector: #selector(refreshBackground))
 
         for background in [effect, tint] {
             background.translatesAutoresizingMaskIntoConstraints = false
@@ -243,15 +242,6 @@ final class CalendarPanelView: NSView {
 
     deinit {
         clockTimer?.invalidate()
-    }
-
-    @objc private func refreshBackground() {
-        // Same treatment as the taskbar: Windows' solid grey instead of vibrancy.
-        let opaque = TaskbarAppearance.reduceTransparency
-        effect.isHidden = opaque
-        tint.layer?.backgroundColor = opaque
-            ? TaskbarAppearance.opaqueBackground.cgColor
-            : NSColor.black.withAlphaComponent(0.28).cgColor
     }
 
     @objc private func clockChanged() {
@@ -475,7 +465,6 @@ private final class CalendarDayCell: NSView {
     private let marker = NSView()
     private static let markerDiameter: CGFloat = 28
 
-    private var date: Date?
     private var isToday = false
 
     init() {
@@ -488,7 +477,6 @@ private final class CalendarDayCell: NSView {
         label.font = NSFont.systemFont(ofSize: 12)
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.setAccessibilityElement(false)
         addSubview(label)
 
         NSLayoutConstraint.activate([
@@ -506,7 +494,6 @@ private final class CalendarDayCell: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(date: Date?, isToday: Bool, isCurrentMonth: Bool) {
-        self.date = date
         self.isToday = isToday
         label.stringValue = date.map { "\(Calendar.autoupdatingCurrent.component(.day, from: $0))" } ?? ""
         if isToday {
@@ -530,15 +517,4 @@ private final class CalendarDayCell: NSView {
         super.viewDidChangeEffectiveAppearance()
         refreshMarker()
     }
-
-    // MARK: - Accessibility
-
-    // Static text rather than a button: days have no action, and VoiceOver would
-    // otherwise announce a control that does nothing when pressed.
-    override func isAccessibilityElement() -> Bool { date != nil }
-    override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
-    override func accessibilityLabel() -> String? {
-        date.map { TaskbarClock.shared.fullDate.string(from: $0) }
-    }
-    override func accessibilityValue() -> Any? { isToday ? "Today" : nil }
 }

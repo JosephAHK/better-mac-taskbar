@@ -115,8 +115,6 @@ final class TaskbarClock {
     private(set) var longTime = DateFormatter()
     private(set) var fullDate = DateFormatter()
     private(set) var monthYear = DateFormatter()
-    /// Spoken by VoiceOver for the tray clock.
-    private(set) var dateAndTime = DateFormatter()
 
     private var minuteTimer: Timer?
 
@@ -159,7 +157,6 @@ final class TaskbarClock {
         monthYear = Self.formatter(template: "yMMMM")
         shortDate = Self.formatter(dateStyle: .short, timeStyle: .none)
         fullDate = Self.formatter(dateStyle: .full, timeStyle: .none)
-        dateAndTime = Self.formatter(dateStyle: .full, timeStyle: .short)
     }
 
     private static func formatter(template: String) -> DateFormatter {
@@ -242,9 +239,6 @@ final class ClockButtonView: NSView {
             clockStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10)
         ])
 
-        for label in [timeLabel, dateLabel] {
-            label.setAccessibilityElement(false)
-        }
         update()
         NotificationCenter.default.addObserver(self, selector: #selector(update), name: TaskbarClock.didChange, object: nil)
     }
@@ -310,23 +304,6 @@ final class ClockButtonView: NSView {
             NSWorkspace.shared.open(url)
         }
     }
-
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { TaskbarClock.shared.dateAndTime.string(from: Date()) }
-    override func accessibilityHelp() -> String? { "Shows the calendar" }
-
-    override func accessibilityPerformPress() -> Bool {
-        onToggle?()
-        return true
-    }
-
-    override func accessibilityPerformShowMenu() -> Bool {
-        popUpTaskbarIconMenu(makeContextMenu(), with: nil, in: self)
-        return true
-    }
 }
 
 /// Far-right Show Desktop strip — full bar height so clicks register on the nonactivating panel.
@@ -365,14 +342,5 @@ private final class ShowDesktopButtonView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onClick?()
-    }
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { "Show desktop" }
-
-    override func accessibilityPerformPress() -> Bool {
-        onClick?()
-        return true
     }
 }

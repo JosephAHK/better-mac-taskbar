@@ -68,8 +68,13 @@ enum WindowDiagnostics {
         }
     }
 
-    /// Log the enumerated window set whenever it changes. Called from `refresh()`
-    /// only on an actual change, so this is one line per real transition.
+    /// Guarded by `lock`.
+    nonisolated(unsafe) private static var lastWindowSetSummary = ""
+
+    /// Log the enumerated window set whenever its logged shape changes. `refresh()`
+    /// calls this on every published change, which includes title-only changes —
+    /// a terminal's progress spinner retitles its window every second, and logging
+    /// each of those identical summaries flooded the log within minutes.
     static func noteWindowSet(_ windows: [WindowInfo]) {
         let summary = windows
             .map { info -> String in
@@ -81,6 +86,12 @@ enum WindowDiagnostics {
                 return "\(info.appName)[cg=\(cg)\(flags.isEmpty ? "" : ",\(flags)")]"
             }
             .joined(separator: " ")
+        let isNew: Bool = lock.withLock {
+            guard summary != lastWindowSetSummary else { return false }
+            lastWindowSetSummary = summary
+            return true
+        }
+        guard isNew else { return }
         AppLog.info("window set changed", ["count": windows.count, "windows": summary])
     }
 

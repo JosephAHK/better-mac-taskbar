@@ -728,6 +728,7 @@ final class WindowManager {
     }
 
     func refresh() {
+        let wasUnresponsive = unresponsivePIDs
         let selfPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && !$0.isTerminated && $0.processIdentifier != selfPID }
@@ -744,9 +745,14 @@ final class WindowManager {
         }
         let next = finalizeActiveFlags(stabilizeOrder(enumerated))
 
-        if next != windows {
+        let windowsChanged = next != windows
+        if windowsChanged {
             windows = next
             WindowDiagnostics.noteWindowSet(next)
+        }
+        // The bar dims hung apps' buttons, so a hang starting or ending is a change
+        // it has to hear about even when no window did.
+        if windowsChanged || unresponsivePIDs != wasUnresponsive {
             NotificationCenter.default.post(name: .windowsUpdated, object: nil)
         }
     }
@@ -782,6 +788,13 @@ final class WindowManager {
     }
 
     // MARK: - Unresponsive apps
+
+    /// Apps the bar shows as "Not responding". That takes a second miss after the
+    /// initial backoff: a single timed-out call is often an app busy launching or
+    /// saving for a moment, and Windows likewise waits for a sustained hang.
+    var unresponsivePIDs: Set<pid_t> {
+        Set(unresponsiveApps.filter { $0.value.backoff > unresponsiveInitialBackoff }.keys)
+    }
 
     private func isBackingOff(_ pid: pid_t) -> Bool {
         guard let entry = unresponsiveApps[pid] else { return false }

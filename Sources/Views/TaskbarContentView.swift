@@ -53,6 +53,7 @@ final class TaskbarContentView: NSView {
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .hiddenAppsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .taskbarOrderChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .launchingAppsChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: DockBadgeMonitor.didChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -185,6 +186,8 @@ final class TaskbarContentView: NSView {
         let style = TaskbarSettings.shared.buttonStyle
         builtStyle = style
         let newItems = Self.orderedDisplayItems()
+        let badges = DockBadgeMonitor.shared
+        let unresponsive = WindowManager.shared.unresponsivePIDs
 
         var ordered: [NSView] = []
         var liveKeys = Set<String>()
@@ -201,9 +204,15 @@ final class TaskbarContentView: NSView {
             }
             switch item {
             case .window(let info):
-                (slot.view as? TaskButtonView)?.apply(info)
+                (slot.view as? TaskButtonView)?.apply(
+                    info,
+                    badge: badges.badge(bundleID: info.bundleID, appName: info.appName),
+                    notResponding: unresponsive.contains(info.pid)
+                )
             case .pinned(let bundleID), .launching(let bundleID):
-                (slot.view as? PinnedButtonView)?.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
+                let pinned = slot.view as? PinnedButtonView
+                pinned?.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
+                pinned?.setBadge(badges.badge(bundleID: bundleID, appName: PinManager.appName(forBundleID: bundleID)))
             }
             ordered.append(slot.view)
         }
@@ -385,13 +394,6 @@ final class TaskbarContentView: NSView {
             return false
         }
 
-        var orderKey: String {
-            switch self {
-            case .pinned(let bundleID), .launching(let bundleID): return bundleID
-            case .window(let info): return info.id
-            }
-        }
-
         /// Keys to try, in priority order, when looking up a persisted rank.
         /// A pinned icon is ranked by bundleID, but the moment its app launches the
         /// same slot becomes a `.window` item keyed by window id — unranked, so it
@@ -510,6 +512,7 @@ final class TaskbarContentView: NSView {
 
     private func performClick(on view: NSView) {
         if let task = view as? TaskButtonView {
+            WindowPreviewController.shared.dismissAfterClick(on: task)
             task.onActivate?(task.windowInfo)
         } else if let pinned = view as? PinnedButtonView {
             pinned.onLaunch?(pinned.bundleID)
@@ -535,21 +538,14 @@ final class TaskbarContentView: NSView {
 
         // Keep the view in the hierarchy — removeFromSuperview mid-drag
         // cancels mouse tracking and leaves the icon stuck grey.
-        let move = {
+        // Animate sibling slides so reordering doesn't snap.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+            context.allowsImplicitAnimation = true
             stack.removeArrangedSubview(view)
             stack.insertArrangedSubview(view, at: toIndex)
             stack.layoutSubtreeIfNeeded()
-        }
-        if TaskbarAppearance.reduceMotion {
-            move()
-        } else {
-            // Animate sibling slides so reordering doesn't snap.
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
-                context.allowsImplicitAnimation = true
-                move()
-            }
         }
         didReorderDuringDrag = true
     }
@@ -641,6 +637,7 @@ extension TaskbarContentView: TaskbarIconDragDelegate {
             guard dx >= dragThreshold || dy >= dragThreshold else { return }
             isDraggingIcon = true
             draggingIcon = view
+            WindowPreviewController.shared.hide()
             view.layer?.opacity = 0.55
             NSCursor.closedHand.set()
             beginDragMouseUpMonitor(for: view)
@@ -685,7 +682,6 @@ private final class TaskOverflowButtonView: NSView {
         chevron.image = NSImage(systemSymbolName: "chevron.right.2", accessibilityDescription: nil)
         chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         chevron.contentTintColor = .labelColor
-        chevron.setAccessibilityElement(false)
         chevron.translatesAutoresizingMaskIntoConstraints = false
         addSubview(chevron)
 
@@ -749,7 +745,7 @@ private final class TaskOverflowButtonView: NSView {
         showMenu(with: event)
     }
 
-    private func showMenu(with event: NSEvent?) {
+    private func showMenu(with event: NSEvent) {
         let entries = entriesProvider?() ?? []
         guard !entries.isEmpty else { return }
         shownEntries = entries
@@ -774,21 +770,5 @@ private final class TaskOverflowButtonView: NSView {
     @objc private func choose(_ sender: NSMenuItem) {
         guard shownEntries.indices.contains(sender.tag) else { return }
         shownEntries[sender.tag].perform()
-    }
-
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { "More windows" }
-
-    override func accessibilityPerformPress() -> Bool {
-        showMenu(with: nil)
-        return true
-    }
-
-    override func accessibilityPerformShowMenu() -> Bool {
-        showMenu(with: nil)
-        return true
     }
 }

@@ -66,18 +66,6 @@ final class StartButtonView: NSView {
     override func mouseDown(with event: NSEvent) {
         onToggle?()
     }
-
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { "Start" }
-    override func accessibilityValue() -> Any? { isHighlighted ? "open" : nil }
-
-    override func accessibilityPerformPress() -> Bool {
-        onToggle?()
-        return true
-    }
 }
 
 final class StartLogoView: NSView {
@@ -589,6 +577,10 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
     var onMenuSessionChange: ((Bool) -> Void)?
     var onRequestClose: (() -> Void)?
 
+    /// Enough to fill the list. A one-letter query matches most apps, and building a
+    /// row (icon lookup included) for each on every keystroke makes typing lag.
+    private static let resultLimit = 8
+
     private let titleLabel = NSTextField(labelWithString: "PINNED")
     private let searchField = NSSearchField()
     private let scroll = NSScrollView()
@@ -925,7 +917,7 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
             query: trimmed,
             launchCounts: StartLaunchCounts.all
         )
-        rebuildRows(apps: matches.map { ($0.bundleID, $0.name) }, allowSelection: true)
+        rebuildRows(apps: matches.prefix(Self.resultLimit).map { ($0.bundleID, $0.name) }, allowSelection: true)
     }
 
     @objc private func pinnedAppsChanged() {
@@ -1024,16 +1016,16 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let pinTitle = PinManager.isPinned(bundleID) ? "Unpin from taskbar" : "Pin to taskbar"
-        menu.addItem(StartMenuActionItem(title: pinTitle) {
+        menu.addItem(ActionMenuItem(title: pinTitle) {
             PinManager.togglePin(bundleID: bundleID)
         })
-        menu.addItem(StartMenuActionItem(title: "Show in Finder") { [weak self] in
+        menu.addItem(ActionMenuItem(title: "Show in Finder") { [weak self] in
             self?.onReveal?(bundleID)
         })
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         if !running.isEmpty {
             menu.addItem(.separator())
-            menu.addItem(StartMenuActionItem(title: "Quit") {
+            menu.addItem(ActionMenuItem(title: "Quit") {
                 running.forEach { $0.terminate() }
             })
         }
@@ -1059,7 +1051,14 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         // NSMenu runs its own tracking loop — suppress the outside-click dismissal so
         // the Start panel isn't torn down underneath the menu.
         onMenuSessionChange?(true)
-        let origin = NSPoint(x: 0, y: powerButton.bounds.height + 4)
+        // `at` is the menu's top-left and the menu grows down from it. The button sits
+        // at the bottom of the screen, so the top goes a full menu height above the
+        // button (unflipped) and the whole menu opens upward, never needing to scroll.
+        // Right edges line up so the menu stays inside the Start panel.
+        let origin = NSPoint(
+            x: powerButton.bounds.width - menu.size.width,
+            y: powerButton.bounds.height + 4 + menu.size.height
+        )
         menu.popUp(positioning: nil, at: origin, in: powerButton)
         onMenuSessionChange?(false)
         powerButton.isActive = false
@@ -1075,23 +1074,6 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
 private final class PowerActionBox: NSObject {
     let action: PowerAction
     init(_ action: PowerAction) { self.action = action }
-}
-
-/// Menu item that runs a closure, for the per-row context menu.
-private final class StartMenuActionItem: NSMenuItem {
-    private let handler: () -> Void
-
-    init(title: String, handler: @escaping () -> Void) {
-        self.handler = handler
-        super.init(title: title, action: #selector(fire), keyEquivalent: "")
-        target = self
-    }
-
-    required init(coder: NSCoder) { fatalError() }
-
-    @objc private func fire() {
-        handler()
-    }
 }
 
 final class StartMenuRow: NSView {

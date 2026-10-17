@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Observable bridge between SwiftUI settings UI and `TaskbarSettings` / system services.
 @MainActor
@@ -29,6 +28,32 @@ final class SettingsStore: ObservableObject {
             TaskbarSettings.shared.buttonStyle = buttonStyle
         }
     }
+
+    @Published var showWindowPreviews: Bool {
+        didSet {
+            guard showWindowPreviews != TaskbarSettings.shared.showWindowPreviews else { return }
+            TaskbarSettings.shared.showWindowPreviews = showWindowPreviews
+        }
+    }
+
+    @Published var windowPreviewDelay: Double {
+        didSet {
+            // Snap to 0.05 s without Slider.step, which draws macOS tick marks.
+            let snapped = (windowPreviewDelay * 20).rounded() / 20
+            let clamped = min(max(snapped, TaskbarSettings.windowPreviewDelayRange.lowerBound),
+                              TaskbarSettings.windowPreviewDelayRange.upperBound)
+            if abs(windowPreviewDelay - clamped) > 0.0001 {
+                windowPreviewDelay = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.windowPreviewDelay) > 0.001 else { return }
+            TaskbarSettings.shared.windowPreviewDelay = clamped
+        }
+    }
+
+    /// Set by code outside the window (the preview flyout's thumbnail hint) to open
+    /// Settings on a particular page; the root view consumes and clears it.
+    @Published var requestedPage: SettingsRootView.Section?
 
     @Published var autoHideTaskbar: Bool {
         didSet {
@@ -88,6 +113,16 @@ final class SettingsStore: ObservableObject {
     @Published private(set) var hotkeyDisplay: String
     @Published private(set) var hiddenApps: [HiddenApp] = []
     @Published private(set) var accessibilityTrusted: Bool
+    /// Screen Recording, which window preview thumbnails need. Only ever preflighted
+    /// here, never requested, so reading it can't put up the system prompt.
+    @Published private(set) var screenRecordingGranted: Bool
+
+    /// Single-window capture (SCScreenshotManager) is macOS 14+; on 13 previews
+    /// show titles only and the Screen Recording controls have nothing to offer.
+    var windowThumbnailsSupported: Bool {
+        if #available(macOS 14.0, *) { return true }
+        return false
+    }
 
     private var observers: [NSObjectProtocol] = []
     private var accessibilityTimer: Timer?
@@ -110,11 +145,14 @@ final class SettingsStore: ObservableObject {
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
+        showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
+        windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
         launchAtLogin = LaunchAtLogin.isRegistered
         launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
 
         // `queue: .main` guarantees the main thread, which is what makes
         // assumeIsolated sound here.
@@ -142,6 +180,8 @@ final class SettingsStore: ObservableObject {
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
+        showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
+        windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
         reloadHiddenApps()
         reloadHotkey()
     }
@@ -152,9 +192,11 @@ final class SettingsStore: ObservableObject {
         launchAtLogin = LaunchAtLogin.isRegistered
         launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
     }
 
-    /// Accessibility can be granted outside the app, so poll while the window is visible.
+    /// Accessibility and Screen Recording can be granted outside the app, so poll
+    /// while the window is visible.
     func startWatchingAccessibility() {
         accessibilityTimer?.invalidate()
         // Scheduled on the main run loop below, so the block always runs on main.
@@ -164,6 +206,10 @@ final class SettingsStore: ObservableObject {
                 let trusted = AccessibilityService.isTrusted(prompt: false)
                 if trusted != self.accessibilityTrusted {
                     self.accessibilityTrusted = trusted
+                }
+                let screenRecording = CGPreflightScreenCaptureAccess()
+                if screenRecording != self.screenRecordingGranted {
+                    self.screenRecordingGranted = screenRecording
                 }
             }
         }
@@ -195,8 +241,10 @@ final class SettingsStore: ObservableObject {
         LaunchAtLogin.openSystemSettings()
     }
 
-    // MARK: Reset / import / export
+    // MARK: Reset
 
+    /// Resetting writes `TaskbarSettings` directly, which bypasses the `replaceDock`
+    /// didSet — so apply the Dock side effect here, then re-sync.
     func resetToDefaults() {
         let alert = NSAlert()
         alert.messageText = "Reset all settings to their defaults?"
@@ -206,50 +254,14 @@ final class SettingsStore: ObservableObject {
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        applyBulkChange { TaskbarSettings.shared.resetToDefaults() }
-        AppLog.info("settings reset to defaults")
-    }
-
-    func exportSettings() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "Better Mac Taskbar Settings.json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try TaskbarSettings.shared.exportJSON().write(to: url, options: .atomic)
-            AppLog.info("settings exported", ["path": url.path])
-        } catch {
-            showError("Couldn't export settings", error)
-        }
-    }
-
-    func importSettings() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let data = try Data(contentsOf: url)
-            try applyBulkChange { try TaskbarSettings.shared.importJSON(data) }
-            AppLog.info("settings imported", ["path": url.path])
-        } catch {
-            AppLog.warn("settings import rejected", ["path": url.path, "error": error.localizedDescription])
-            showError("Couldn't import settings", error)
-        }
-    }
-
-    /// Reset and import write `TaskbarSettings` directly, which bypasses the
-    /// `replaceDock` didSet — so apply the Dock side effect here, then re-sync.
-    private func applyBulkChange(_ change: () throws -> Void) rethrows {
         HotkeyRecorder.shared.cancel()
         let replacedDock = TaskbarSettings.shared.replaceDock
-        defer {
-            if TaskbarSettings.shared.replaceDock != replacedDock {
-                Self.applyDockMode()
-            }
-            refresh()
+        TaskbarSettings.shared.resetToDefaults()
+        if TaskbarSettings.shared.replaceDock != replacedDock {
+            Self.applyDockMode()
         }
-        try change()
+        refresh()
+        AppLog.info("settings reset to defaults")
     }
 
     private static func applyDockMode() {
@@ -260,19 +272,26 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    private func showError(_ message: String, _ error: Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = message
-        alert.informativeText = error.localizedDescription
-        alert.runModal()
-    }
-
     func openAccessibilitySettings() {
         if !accessibilityTrusted {
             _ = AccessibilityService.isTrusted(prompt: true)
         }
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// The one place the app asks for Screen Recording, and only from the user's
+    /// click. macOS shows its prompt the first time; once the user has answered,
+    /// it shows nothing, which is what "Open Privacy Settings" is for.
+    func requestScreenRecording() {
+        let granted = CGRequestScreenCaptureAccess()
+        AppLog.info("screen recording requested", ["granted": granted])
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
+    }
+
+    func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
     }

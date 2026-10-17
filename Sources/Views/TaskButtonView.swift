@@ -23,19 +23,88 @@ extension TaskbarOrderable {
 /// Context menus from a bottom-edge `.nonactivatingPanel` mis-place with
 /// `popUpContextMenu` (stuck to the screen bottom). Pop upward from the icon instead.
 /// The bar is held visible for the menu's lifetime so auto-hide can't slide it
-/// away underneath. `event` is nil when VoiceOver asks for the menu, which then
-/// opens over the middle of the view.
+/// away underneath.
 @MainActor
-func popUpTaskbarIconMenu(_ menu: NSMenu, with event: NSEvent?, in view: NSView) {
+func popUpTaskbarIconMenu(_ menu: NSMenu, with event: NSEvent, in view: NSView) {
+    // The preview flyout sits where the menu opens.
+    WindowPreviewController.shared.hide()
     TaskbarPanelController.shared.beginKeepVisible()
     defer { TaskbarPanelController.shared.endKeepVisible() }
 
-    let x = event.map { view.convert($0.locationInWindow, from: nil).x } ?? view.bounds.midX
     // Top of the icon — AppKit grows the menu downward from this point, then flips
     // it above the taskbar when there isn't room below (screen edge).
-    let anchor = NSPoint(x: x, y: view.bounds.maxY)
+    let anchor = NSPoint(x: view.convert(event.locationInWindow, from: nil).x, y: view.bounds.maxY)
     menu.popUp(positioning: nil, at: anchor, in: view)
 }
+
+/// App icon edge on task and pinned buttons.
+private func taskbarIconSize(forBarHeight height: CGFloat) -> CGFloat {
+    max(18, min(height * 0.55, 36))
+}
+
+// MARK: - Badges
+
+/// The app's Dock badge as a small red pill over the icon's corner.
+final class IconPillView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private static let height: CGFloat = 14
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = Self.height / 2
+        isHidden = true
+
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        label.textColor = .white
+        label.alignment = .center
+        addSubview(label)
+        refreshAppearance()
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshAppearance))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    var text: String? {
+        didSet {
+            label.stringValue = text ?? ""
+            isHidden = text == nil
+        }
+    }
+
+    /// At most three characters, so the pill never outgrows the icon. Counts past 99
+    /// read "99+" as on Windows; other labels ("!", "New") keep their first three.
+    static func badgeText(_ raw: String) -> String {
+        let isNumber = raw.contains(where: \.isNumber)
+            && raw.allSatisfy { $0.isNumber || $0.isPunctuation || $0.isWhitespace }
+        if isNumber, let count = Int(raw.filter(\.isNumber)), count > 99 { return "99+" }
+        return String(raw.prefix(3))
+    }
+
+    /// Centres the pill on `center`, kept inside the superview.
+    func place(at center: NSPoint) {
+        let width = max(Self.height, ceil(label.intrinsicContentSize.width) + 6)
+        var origin = NSPoint(x: center.x - width / 2, y: center.y - Self.height / 2)
+        if let container = superview?.bounds {
+            origin.x = min(max(origin.x, container.minX), container.maxX - width)
+            origin.y = min(max(origin.y, container.minY), container.maxY - Self.height)
+        }
+        frame = NSRect(origin: origin, size: NSSize(width: width, height: Self.height))
+        let labelHeight = ceil(label.intrinsicContentSize.height)
+        label.frame = NSRect(x: 0, y: (Self.height - labelHeight) / 2, width: width, height: labelHeight)
+    }
+
+    @objc private func refreshAppearance() {
+        layer?.backgroundColor = resolvedCGColor(.systemRed)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
+    }
+}
+
+// MARK: - Window button
 
 final class TaskButtonView: NSView, TaskbarOrderable {
     private(set) var windowInfo: WindowInfo
@@ -51,9 +120,12 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     var orderKey: String { windowInfo.id }
     var orderAliasKey: String? { windowInfo.bundleID }
 
+    private(set) var isNotResponding = false
+
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let underline = NSView()
+    private let badgeView = IconPillView()
     private var tracking: NSTrackingArea?
     /// Tracked rather than painted once on entry so the hover tint survives the
     /// repaints every window-list update and layout pass trigger.
@@ -68,7 +140,6 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
         setup()
-        toolTip = windowInfo.displayTitle
         TaskbarAppearance.addObserver(self, selector: #selector(refreshAppearance))
     }
 
@@ -78,13 +149,11 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.wantsLayer = true
         iconView.layer?.cornerRadius = 3
-        iconView.setAccessibilityElement(false)
         addSubview(iconView)
 
         titleLabel.font = NSFont.systemFont(ofSize: 12)
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setAccessibilityElement(false)
         addSubview(titleLabel)
 
         if let app = NSRunningApplication(processIdentifier: windowInfo.pid) {
@@ -96,24 +165,41 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         underline.wantsLayer = true
         underline.layer?.cornerRadius = 1
         addSubview(underline)
-        titleLabel.stringValue = Self.labelText(for: windowInfo)
+        addSubview(badgeView)
+        applyWindow()
         layoutContents()
         refreshAppearance()
     }
 
-    func apply(_ info: WindowInfo) {
+    /// The window plus its app's Dock badge and hung state. Every window-list update
+    /// lands here for every button, so an unchanged button does no work at all.
+    func apply(_ info: WindowInfo, badge: String?, notResponding: Bool) {
+        let badgeText = badge.map(IconPillView.badgeText)
+        let changed = info != windowInfo || badgeText != badgeView.text || notResponding != isNotResponding
+        // Always take the fresh snapshot: equality ignores its AX element.
         windowInfo = info
-        toolTip = info.displayTitle
-        if style.showsTitle {
-            titleLabel.stringValue = Self.labelText(for: info)
+        guard changed else { return }
+        isNotResponding = notResponding
+        if badgeText != badgeView.text {
+            badgeView.text = badgeText
+            needsLayout = true
         }
+        applyWindow()
         refreshAppearance()
+        WindowPreviewController.shared.buttonDidUpdate(self)
     }
 
-    /// Window title where we have one, otherwise the app name — the app name is
-    /// already implied by the icon, so the document title is the useful part.
-    private static func labelText(for info: WindowInfo) -> String {
-        info.title.isEmpty ? info.appName : info.title
+    private func applyWindow() {
+        if style.showsTitle {
+            // Window title where we have one, otherwise the app name — the app name is
+            // already implied by the icon, so the document title is the useful part.
+            titleLabel.stringValue = windowInfo.title.isEmpty ? windowInfo.appName : windowInfo.title
+        }
+        // With previews on, the flyout shows the title; a tooltip on top of it would
+        // cover the flyout.
+        toolTip = TaskbarSettings.shared.showWindowPreviews
+            ? nil
+            : windowInfo.displayTitle + (isNotResponding ? " (Not responding)" : "")
     }
 
     override func layout() {
@@ -129,7 +215,7 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     }
 
     private func layoutContents() {
-        let iconSize = max(18, min(barHeight * 0.55, 36))
+        let iconSize = taskbarIconSize(forBarHeight: barHeight)
         titleLabel.isHidden = !showsTitle
         if showsTitle {
             let inset: CGFloat = 10
@@ -154,6 +240,7 @@ final class TaskButtonView: NSView, TaskbarOrderable {
                 height: iconSize
             )
         }
+        badgeView.place(at: NSPoint(x: iconView.frame.maxX - 2, y: iconView.frame.maxY - 2))
     }
 
     @objc private func refreshAppearance() {
@@ -168,20 +255,29 @@ final class TaskButtonView: NSView, TaskbarOrderable {
             // for the active window. Labeled buttons are wide, so it hugs the edges
             // more tightly than on the square icons.
             let inset: CGFloat = showsTitle ? 8 : 18
-            // Without the frosted background behind it the faint bar washes out
-            // against flat grey, so it gets more contrast.
-            let alpha: CGFloat = TaskbarAppearance.reduceTransparency ? 0.75 : 0.45
-            underline.layer?.backgroundColor = NSColor.white.withAlphaComponent(alpha).cgColor
+            underline.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.45).cgColor
             underline.frame = NSRect(x: inset, y: 0, width: max(width - inset * 2, 6), height: 3)
             layer?.backgroundColor = isHovered
                 ? NSColor.white.withAlphaComponent(0.12).cgColor
                 : NSColor.clear.cgColor
         }
+
+        // A hung app's button greys out, as on Windows.
+        iconView.alphaValue = isNotResponding ? 0.45 : 1
+        titleLabel.alphaValue = isNotResponding ? 0.55 : 1
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         refreshAppearance()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Removed from the bar: its window closed, or the strip was rebuilt.
+        if window == nil {
+            WindowPreviewController.shared.buttonDidDisappear(self)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -195,11 +291,13 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
         refreshAppearance()
+        WindowPreviewController.shared.pointerEntered(self)
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         refreshAppearance()
+        WindowPreviewController.shared.pointerExited(self)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -257,12 +355,10 @@ final class TaskButtonView: NSView, TaskbarOrderable {
 
         let close = NSMenuItem(title: "Close window", action: #selector(closeWindow), keyEquivalent: "")
         close.target = self
-        close.isEnabled = true
         menu.addItem(close)
 
         let minimize = NSMenuItem(title: "Minimize", action: #selector(minimizeWindow), keyEquivalent: "")
         minimize.target = self
-        minimize.isEnabled = true
         menu.addItem(minimize)
         menu.addItem(.separator())
 
@@ -278,28 +374,6 @@ final class TaskButtonView: NSView, TaskbarOrderable {
         return menu
     }
 
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { windowInfo.displayTitle }
-
-    override func accessibilityValue() -> Any? {
-        if windowInfo.isActive { return "Active window" }
-        if windowInfo.isMinimized { return "Minimized" }
-        return nil
-    }
-
-    override func accessibilityPerformPress() -> Bool {
-        onActivate?(windowInfo)
-        return true
-    }
-
-    override func accessibilityPerformShowMenu() -> Bool {
-        popUpTaskbarIconMenu(makeContextMenu(), with: nil, in: self)
-        return true
-    }
-
     @objc private func pinToggle() { onPinToggle?(windowInfo) }
     @objc private func hideToggle() { onHideToggle?(windowInfo) }
     @objc private func closeWindow() { onClose?(windowInfo) }
@@ -313,6 +387,8 @@ final class TaskButtonView: NSView, TaskbarOrderable {
     }
 }
 
+// MARK: - Pinned app button
+
 final class PinnedButtonView: NSView, TaskbarOrderable {
     let bundleID: String
     var onLaunch: ((String) -> Void)?
@@ -325,6 +401,7 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
+    private let badgeView = IconPillView()
     private var tracking: NSTrackingArea?
     private var isHovered = false
     private let style: TaskbarButtonStyle
@@ -340,7 +417,6 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.image = PinManager.icon(forBundleID: bundleID)
         iconView.wantsLayer = true
-        iconView.setAccessibilityElement(false)
         addSubview(iconView)
 
         titleLabel.font = NSFont.systemFont(ofSize: 12)
@@ -348,7 +424,6 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.stringValue = PinManager.appName(forBundleID: bundleID)
         titleLabel.isHidden = !style.showsTitle
-        titleLabel.setAccessibilityElement(false)
         addSubview(titleLabel)
 
         spinner.style = .spinning
@@ -356,10 +431,10 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
         spinner.isIndeterminate = true
         spinner.isDisplayedWhenStopped = false
         addSubview(spinner)
+        addSubview(badgeView)
 
         layoutContents()
         toolTip = PinManager.appName(forBundleID: bundleID)
-        TaskbarAppearance.addObserver(self, selector: #selector(displayOptionsChanged))
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -373,37 +448,28 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
             ? "Opening \(PinManager.appName(forBundleID: bundleID))…"
             : PinManager.appName(forBundleID: bundleID)
 
+        iconView.layer?.removeAnimation(forKey: "launchPulse")
         if launching {
             spinner.startAnimation(nil)
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.85
+            pulse.toValue = 0.35
+            pulse.duration = 0.7
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            iconView.layer?.add(pulse, forKey: "launchPulse")
         } else {
             spinner.stopAnimation(nil)
         }
-        applyLaunchDimming()
     }
 
-    /// Pulses the icon while launching, or holds it steadily dimmed under Reduce Motion.
-    private func applyLaunchDimming() {
-        iconView.layer?.removeAnimation(forKey: "launchPulse")
-        guard isLaunching else {
-            iconView.layer?.opacity = 1
-            return
-        }
-        if TaskbarAppearance.reduceMotion {
-            iconView.layer?.opacity = 0.55
-            return
-        }
-        iconView.layer?.opacity = 1
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 0.85
-        pulse.toValue = 0.35
-        pulse.duration = 0.7
-        pulse.autoreverses = true
-        pulse.repeatCount = .infinity
-        iconView.layer?.add(pulse, forKey: "launchPulse")
-    }
-
-    @objc private func displayOptionsChanged() {
-        applyLaunchDimming()
+    /// An app that is running without windows (Mail with its viewer closed) keeps its
+    /// Dock badge, and this is the button it shows on.
+    func setBadge(_ badge: String?) {
+        let text = badge.map(IconPillView.badgeText)
+        guard text != badgeView.text else { return }
+        badgeView.text = text
+        needsLayout = true
     }
 
     override func layout() {
@@ -412,7 +478,7 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
     }
 
     private func layoutContents() {
-        let iconSize = max(18, min(barHeight * 0.55, 36))
+        let iconSize = taskbarIconSize(forBarHeight: barHeight)
         if style.showsTitle {
             let inset: CGFloat = 10
             iconView.frame = NSRect(x: inset, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize)
@@ -440,6 +506,7 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
             width: spinnerSize,
             height: spinnerSize
         )
+        badgeView.place(at: NSPoint(x: iconView.frame.maxX - 2, y: iconView.frame.maxY - 2))
     }
 
     override func updateTrackingAreas() {
@@ -500,22 +567,4 @@ final class PinnedButtonView: NSView, TaskbarOrderable {
     @objc private func unpin() { onUnpin?(bundleID) }
     @objc private func hideApp() { onHide?(bundleID) }
     @objc private func openApp() { onLaunch?(bundleID) }
-
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { PinManager.appName(forBundleID: bundleID) }
-    override func accessibilityValue() -> Any? { isLaunching ? "Opening" : nil }
-    override func accessibilityHelp() -> String? { "Pinned app" }
-
-    override func accessibilityPerformPress() -> Bool {
-        onLaunch?(bundleID)
-        return true
-    }
-
-    override func accessibilityPerformShowMenu() -> Bool {
-        popUpTaskbarIconMenu(makeContextMenu(), with: nil, in: self)
-        return true
-    }
 }

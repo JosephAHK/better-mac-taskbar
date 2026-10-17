@@ -20,15 +20,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show() {
+    func show(page: SettingsRootView.Section? = nil) {
         SettingsStore.shared.refresh()
         SettingsStore.shared.startWatchingAccessibility()
-        window?.makeKeyAndOrderFront(nil)
-        if #available(macOS 14, *) {
-            NSApp.activate()
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
+        if let page {
+            SettingsStore.shared.requestedPage = page
         }
+        window?.makeKeyAndOrderFront(nil)
+        // Not the macOS 14 `activate()`: that one is cooperative, and opened from the
+        // menu bar or a non-activating flyout it can leave Settings behind the app
+        // the user is in.
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Login-item approval and Accessibility are granted in System Settings, so

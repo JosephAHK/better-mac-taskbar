@@ -32,7 +32,6 @@ class TrayItemButtonView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.setAccessibilityElement(false)
         addSubview(iconView)
 
         titleLabel.stringValue = title
@@ -40,7 +39,6 @@ class TrayItemButtonView: NSView {
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.setAccessibilityElement(false)
         addSubview(titleLabel)
 
         NSLayoutConstraint.activate([
@@ -101,17 +99,5 @@ class TrayItemButtonView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onToggle?()
-    }
-
-    // MARK: - Accessibility
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { titleLabel.stringValue }
-    override func accessibilityValue() -> Any? { isOpen ? "Open" : nil }
-
-    override func accessibilityPerformPress() -> Bool {
-        onToggle?()
-        return true
     }
 }

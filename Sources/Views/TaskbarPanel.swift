@@ -28,13 +28,30 @@ final class TaskbarPanelController {
     /// setting, and re-running the hide pass for an unrelated one would snap a
     /// revealed bar shut under the pointer.
     private var appliedAutoHide: Bool?
+    /// Bars partway through an animated reveal, keyed to that reveal's generation so
+    /// a reveal that was interrupted (by a hide, or a reframe) never reports settling.
+    private var revealsInFlight: [ScreenKey: Int] = [:]
+    private var revealGeneration = 0
 
     private let peekHeight: CGFloat = 2
     private let slideDuration: TimeInterval = 0.18
+    /// Bars with a display stacked below fade in place rather than slide.
+    private let fadeDuration: TimeInterval = 0.12
+
+    /// Whether any screen's bar is on screen rather than auto-hidden away.
+    var isBarVisible: Bool { !revealedKeys.isEmpty }
+
+    /// Whether `window` is a bar that is fully revealed and not moving, so something
+    /// anchored to it (the preview flyout) lands where the bar will stay.
+    func isSettled(_ window: NSWindow) -> Bool {
+        guard let key = entries.first(where: { $0.value.panel === window })?.key else { return false }
+        return revealedKeys.contains(key) && revealsInFlight[key] == nil
+    }
 
     func show() {
         AppLog.info("TaskbarPanel.show", ["screens": NSScreen.screens.count])
         syncPanels()
+        DockBadgeMonitor.shared.start()
         guard !observersRegistered else { return }
         observersRegistered = true
         NotificationCenter.default.addObserver(
@@ -49,12 +66,12 @@ final class TaskbarPanelController {
             name: .taskbarSettingsChanged,
             object: nil
         )
-        TaskbarAppearance.addObserver(self, selector: #selector(displayOptionsChanged))
     }
 
     func hide() {
         AppLog.info("TaskbarPanel.hide")
         closeOverlays(on: Array(entries.keys))
+        DockBadgeMonitor.shared.stop()
         stopMouseMonitoring()
         cancelAllHideTimers()
         for entry in entries.values {
@@ -62,6 +79,7 @@ final class TaskbarPanelController {
         }
         entries.removeAll()
         revealedKeys.removeAll()
+        revealsInFlight.removeAll()
         appliedAutoHide = nil
         // Every overlay was just closed, so nothing can still legitimately hold the
         // bar open. Zeroing also recovers from an owner that went away without
@@ -113,14 +131,6 @@ final class TaskbarPanelController {
         updateAutoHideMode()
     }
 
-    @objc private func displayOptionsChanged() {
-        // Reduce Motion switches between sliding and fading; re-park every panel in
-        // its current state so a hidden bar moves to the right resting place.
-        for key in entries.keys {
-            setRevealed(revealedKeys.contains(key), for: key, animated: false)
-        }
-    }
-
     private static func key(for screen: NSScreen) -> ScreenKey? {
         screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
     }
@@ -149,6 +159,7 @@ final class TaskbarPanelController {
             entries[key]?.panel.orderOut(nil)
             entries[key] = nil
             revealedKeys.remove(key)
+            revealsInFlight[key] = nil
         }
 
         for (key, screen) in current {
@@ -181,6 +192,7 @@ final class TaskbarPanelController {
         DownloadsPanelController.shared.hide()
         TrashPanelController.shared.hide()
         CalendarPanelController.shared.hide()
+        WindowPreviewController.shared.hide()
     }
 
     private func updateAutoHideMode() {
@@ -236,20 +248,29 @@ final class TaskbarPanelController {
         // appearance makes every dynamic colour on the bar resolve to its dark variant.
         panel.appearance = NSAppearance(named: .darkAqua)
 
-        let background = TaskbarBackgroundView(frame: NSRect(origin: .zero, size: frame.size))
-        background.autoresizingMask = [.width, .height]
+        let effect = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+        effect.autoresizingMask = [.width, .height]
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
 
-        let content = TaskbarContentView(frame: background.bounds)
+        let tint = NSView(frame: effect.bounds)
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        effect.addSubview(tint)
+
+        let content = TaskbarContentView(frame: effect.bounds)
         content.autoresizingMask = [.width, .height]
-        background.addSubview(content)
+        effect.addSubview(content)
 
         let line = NSView(frame: NSRect(x: 0, y: height - 1, width: frame.width, height: 1))
         line.autoresizingMask = [.width, .minYMargin]
         line.wantsLayer = true
         line.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        background.addSubview(line)
+        effect.addSubview(line)
 
-        panel.contentView = background
+        panel.contentView = effect
         panel.setFrame(frame, display: true)
         panel.orderFrontRegardless()
         return Entry(panel: panel, content: content, screen: screen)
@@ -358,7 +379,7 @@ final class TaskbarPanelController {
 
         let height = TaskbarSettings.shared.barHeight
         let screenFrame = entry.screen.frame
-        let fades = TaskbarAppearance.reduceMotion || hasScreen(below: screenFrame, barHeight: height)
+        let fades = hasScreen(below: screenFrame, barHeight: height)
         let hiddenY = fades ? screenFrame.minY : screenFrame.minY - (height - peekHeight)
         let frame = NSRect(
             x: screenFrame.minX,
@@ -371,18 +392,45 @@ final class TaskbarPanelController {
         // through to the windows beneath it. Reveal stays driven by the mouse
         // monitors, which don't depend on the panel receiving events.
         entry.panel.ignoresMouseEvents = alpha == 0
+        // A preview placed against the bar's old position would be left floating.
+        if entry.panel.frame != frame || entry.panel.alphaValue != alpha {
+            WindowPreviewController.shared.barWillMove(entry.panel)
+        }
 
+        // Superseding a reveal mid-flight ends it; jumping straight to revealed
+        // settles the bar here rather than in the completion handler.
+        let interruptedReveal = revealsInFlight.removeValue(forKey: key) != nil
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = fades ? TaskbarAppearance.reducedMotionFade : slideDuration
+            let generation: Int? = revealed ? nextRevealGeneration() : nil
+            revealsInFlight[key] = generation
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = fades ? fadeDuration : slideDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 entry.panel.animator().setFrame(frame, display: true)
                 entry.panel.animator().alphaValue = alpha
-            }
+            }, completionHandler: { [weak self] in
+                guard let generation else { return }
+                // Animation completions run on the main thread.
+                MainActor.assumeIsolated { self?.revealFinished(key, generation: generation) }
+            })
         } else {
             entry.panel.setFrame(frame, display: true)
             entry.panel.alphaValue = alpha
+            if revealed, interruptedReveal {
+                WindowPreviewController.shared.barDidSettle(entry.panel)
+            }
         }
+    }
+
+    private func nextRevealGeneration() -> Int {
+        revealGeneration += 1
+        return revealGeneration
+    }
+
+    private func revealFinished(_ key: ScreenKey, generation: Int) {
+        guard revealsInFlight[key] == generation, let panel = entries[key]?.panel else { return }
+        revealsInFlight[key] = nil
+        WindowPreviewController.shared.barDidSettle(panel)
     }
 
     /// Parking the bar below its screen only hides it when nothing is there. With
@@ -391,42 +439,5 @@ final class TaskbarPanelController {
     private func hasScreen(below frame: NSRect, barHeight: CGFloat) -> Bool {
         let parked = NSRect(x: frame.minX, y: frame.minY - barHeight, width: frame.width, height: barHeight)
         return NSScreen.screens.contains { $0.frame != frame && $0.frame.intersects(parked) }
-    }
-}
-
-/// Frosted bar background, swapped for Windows' solid grey under Reduce Transparency.
-private final class TaskbarBackgroundView: NSView {
-    private let effect = NSVisualEffectView()
-    private let tint = NSView()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        effect.frame = bounds
-        effect.autoresizingMask = [.width, .height]
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        addSubview(effect)
-
-        tint.frame = bounds
-        tint.autoresizingMask = [.width, .height]
-        tint.wantsLayer = true
-        addSubview(tint)
-
-        refresh()
-        TaskbarAppearance.addObserver(self, selector: #selector(refresh))
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func refresh() {
-        // The system already flattens vibrancy under Reduce Transparency, but to its
-        // own window grey; hide it outright so the bar is the same solid colour as
-        // Windows' and doesn't pick up the desktop behind it.
-        let opaque = TaskbarAppearance.reduceTransparency
-        effect.isHidden = opaque
-        tint.layer?.backgroundColor = opaque
-            ? TaskbarAppearance.opaqueBackground.cgColor
-            : NSColor.black.withAlphaComponent(0.35).cgColor
     }
 }

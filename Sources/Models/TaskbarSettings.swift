@@ -153,6 +153,8 @@ final class TaskbarSettings: @unchecked Sendable {
     private enum Key {
         static let centerIcons = "centerIcons"
         static let buttonStyle = "taskbarButtonStyle"
+        static let showWindowPreviews = "showWindowPreviews"
+        static let windowPreviewDelay = "windowPreviewDelay"
         static let replaceDock = "replaceDock"
         static let autoHideTaskbar = "autoHideTaskbar"
         static let autoHideRevealZone = "autoHideRevealZone"
@@ -170,7 +172,8 @@ final class TaskbarSettings: @unchecked Sendable {
         /// Everything the user chose. Excludes the one-shot prompt flags, which
         /// record what the app already asked rather than a preference.
         static let userSettings = [
-            centerIcons, buttonStyle, replaceDock, autoHideTaskbar, autoHideRevealZone,
+            centerIcons, buttonStyle, showWindowPreviews, windowPreviewDelay,
+            replaceDock, autoHideTaskbar, autoHideRevealZone,
             autoHideDelay, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
             startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly
         ]
@@ -188,16 +191,39 @@ final class TaskbarSettings: @unchecked Sendable {
 
     /// Icon-only squares, or wide buttons showing the window title.
     var buttonStyle: TaskbarButtonStyle {
-        get {
-            guard let raw = defaults.string(forKey: Key.buttonStyle),
-                  let style = TaskbarButtonStyle(rawValue: raw) else {
-                return .default
-            }
-            return style
-        }
+        get { defaults.string(forKey: Key.buttonStyle).flatMap(TaskbarButtonStyle.init(rawValue:)) ?? .default }
         set {
             defaults.set(newValue.rawValue, forKey: Key.buttonStyle)
             NotificationCenter.default.post(name: .taskbarSettingsChanged, object: nil)
+        }
+    }
+
+    /// Hovering a task button shows a flyout with the window's title — and its
+    /// thumbnail, when Screen Recording is granted.
+    var showWindowPreviews: Bool {
+        get { defaults.object(forKey: Key.showWindowPreviews) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Key.showWindowPreviews)
+            NotificationCenter.default.post(name: .taskbarSettingsChanged, object: nil)
+        }
+    }
+
+    /// Seconds the pointer rests on a task button before its preview opens. Once a
+    /// preview is up, moving to the next button swaps it immediately regardless.
+    static let windowPreviewDelayRange: ClosedRange<Double> = 0...1.5
+    static let windowPreviewDelayDefault: Double = 0.4
+
+    var windowPreviewDelay: Double {
+        get {
+            guard defaults.object(forKey: Key.windowPreviewDelay) != nil else {
+                return Self.windowPreviewDelayDefault
+            }
+            let raw = defaults.double(forKey: Key.windowPreviewDelay)
+            return min(max(raw, Self.windowPreviewDelayRange.lowerBound), Self.windowPreviewDelayRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.windowPreviewDelayRange.lowerBound), Self.windowPreviewDelayRange.upperBound)
+            defaults.set(clamped, forKey: Key.windowPreviewDelay)
         }
     }
 
@@ -357,41 +383,9 @@ final class TaskbarSettings: @unchecked Sendable {
     }
 }
 
-// MARK: - Reset / import / export
+// MARK: - Reset
 
 extension TaskbarSettings {
-    private enum FileKey {
-        static let format = "format"
-        static let version = "version"
-        static let startMenuHotkey = "startMenuHotkey"
-        static let keyCode = "keyCode"
-        static let modifierFlags = "modifierFlags"
-        static let modifierOnly = "modifierOnly"
-    }
-
-    private static let fileFormat = "com.bettermac.taskbar.settings"
-    private static let fileVersion = 1
-
-    enum ImportError: LocalizedError {
-        case notASettingsFile
-        case unsupportedVersion(Int)
-        case unknownKeys([String])
-        case invalidValue(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .notASettingsFile:
-                return "This file isn't a Better Mac Taskbar settings export."
-            case .unsupportedVersion(let version):
-                return "This settings file is version \(version), which this version of Better Mac Taskbar can't read."
-            case .unknownKeys(let keys):
-                return "This settings file contains unrecognized settings: \(keys.joined(separator: ", "))."
-            case .invalidValue(let key):
-                return "The value for \"\(key)\" in this settings file isn't valid."
-            }
-        }
-    }
-
     /// Removes every user setting so each getter falls back to its default.
     func resetToDefaults() {
         for key in Key.userSettings {
@@ -404,132 +398,6 @@ extension TaskbarSettings {
         ] {
             NotificationCenter.default.post(name: name, object: nil)
         }
-    }
-
-    func exportJSON() throws -> Data {
-        let hotkey = startMenuHotkey
-        let object: [String: Any] = [
-            FileKey.format: Self.fileFormat,
-            FileKey.version: Self.fileVersion,
-            Key.centerIcons: centerIcons,
-            Key.buttonStyle: buttonStyle.rawValue,
-            Key.replaceDock: replaceDock,
-            Key.autoHideTaskbar: autoHideTaskbar,
-            Key.autoHideRevealZone: autoHideRevealZone,
-            Key.autoHideDelay: autoHideDelay,
-            Key.pinnedBundleIDs: pinnedBundleIDs,
-            Key.hiddenBundleIDs: hiddenBundleIDs,
-            Key.taskbarOrder: taskbarOrder,
-            Key.startHotkeyEnabled: startHotkeyEnabled,
-            FileKey.startMenuHotkey: [
-                FileKey.keyCode: Int(hotkey.keyCode),
-                FileKey.modifierFlags: Int(hotkey.modifierFlags),
-                FileKey.modifierOnly: hotkey.modifierOnly
-            ]
-        ]
-        return try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-    }
-
-    /// Applies an export. Settings missing from the file are left as they are.
-    /// Every value is validated before any is applied, so a bad file changes
-    /// nothing; accepted values go through the normal setters (and their clamping).
-    func importJSON(_ data: Data) throws {
-        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              object[FileKey.format] as? String == Self.fileFormat else {
-            throw ImportError.notASettingsFile
-        }
-        guard let version = Self.integer(object[FileKey.version]) else {
-            throw ImportError.notASettingsFile
-        }
-        guard version == Self.fileVersion else {
-            throw ImportError.unsupportedVersion(version)
-        }
-        let known: Set<String> = [
-            FileKey.format, FileKey.version, FileKey.startMenuHotkey,
-            Key.centerIcons, Key.buttonStyle, Key.replaceDock, Key.autoHideTaskbar,
-            Key.autoHideRevealZone, Key.autoHideDelay, Key.pinnedBundleIDs,
-            Key.hiddenBundleIDs, Key.taskbarOrder, Key.startHotkeyEnabled
-        ]
-        let unknown = Set(object.keys).subtracting(known).sorted()
-        guard unknown.isEmpty else { throw ImportError.unknownKeys(unknown) }
-
-        var changes: [() -> Void] = []
-
-        func bool(_ key: String, _ assign: @escaping (Bool) -> Void) throws {
-            guard let raw = object[key] else { return }
-            guard let value = Self.boolean(raw) else { throw ImportError.invalidValue(key) }
-            changes.append { assign(value) }
-        }
-        func strings(_ key: String, _ assign: @escaping ([String]) -> Void) throws {
-            guard let raw = object[key] else { return }
-            guard let value = raw as? [String] else { throw ImportError.invalidValue(key) }
-            changes.append { assign(value) }
-        }
-
-        try bool(Key.centerIcons) { self.centerIcons = $0 }
-        try bool(Key.replaceDock) { self.replaceDock = $0 }
-        try bool(Key.autoHideTaskbar) { self.autoHideTaskbar = $0 }
-        try bool(Key.startHotkeyEnabled) { self.startHotkeyEnabled = $0 }
-        try strings(Key.pinnedBundleIDs) { self.pinnedBundleIDs = $0 }
-        try strings(Key.hiddenBundleIDs) { self.hiddenBundleIDs = $0 }
-        try strings(Key.taskbarOrder) { self.taskbarOrder = $0 }
-
-        if let raw = object[Key.buttonStyle] {
-            guard let style = (raw as? String).flatMap(TaskbarButtonStyle.init(rawValue:)) else {
-                throw ImportError.invalidValue(Key.buttonStyle)
-            }
-            changes.append { self.buttonStyle = style }
-        }
-        if let raw = object[Key.autoHideRevealZone] {
-            guard let zone = Self.integer(raw) else { throw ImportError.invalidValue(Key.autoHideRevealZone) }
-            changes.append { self.autoHideRevealZone = zone }
-        }
-        if let raw = object[Key.autoHideDelay] {
-            guard let delay = Self.number(raw) else { throw ImportError.invalidValue(Key.autoHideDelay) }
-            changes.append { self.autoHideDelay = delay }
-        }
-        if let raw = object[FileKey.startMenuHotkey] {
-            guard let hotkey = Self.hotkey(raw) else { throw ImportError.invalidValue(FileKey.startMenuHotkey) }
-            changes.append { self.startMenuHotkey = hotkey }
-        }
-
-        changes.forEach { $0() }
-    }
-
-    /// Rejects anything the recorder itself would not have produced.
-    private static func hotkey(_ raw: Any) -> StartMenuHotkey? {
-        guard let dict = raw as? [String: Any],
-              Set(dict.keys) == [FileKey.keyCode, FileKey.modifierFlags, FileKey.modifierOnly],
-              let keyCode = integer(dict[FileKey.keyCode]).flatMap(UInt16.init(exactly:)),
-              let flags = integer(dict[FileKey.modifierFlags]).flatMap(UInt.init(exactly:)),
-              let modifierOnly = boolean(dict[FileKey.modifierOnly]) else {
-            return nil
-        }
-        let hotkey = StartMenuHotkey(keyCode: keyCode, modifierFlags: flags, modifierOnly: modifierOnly)
-        if modifierOnly {
-            return StartMenuHotkey.modifierFlag(forKeyCode: keyCode) == nil ? nil : hotkey
-        }
-        return StartMenuHotkey.isAcceptableChord(keyCode: keyCode, modifierFlags: hotkey.nsModifierFlags)
-            ? hotkey : nil
-    }
-
-    // JSONSerialization returns NSNumber for both JSON booleans and numbers, and
-    // Swift bridges either way (`true as? Int == 1`), so check the CF type to keep
-    // `"autoHideRevealZone": true` or `"centerIcons": 1` from slipping through.
-
-    private static func boolean(_ raw: Any?) -> Bool? {
-        guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
-        return number.boolValue
-    }
-
-    private static func number(_ raw: Any?) -> Double? {
-        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        return number.doubleValue
-    }
-
-    private static func integer(_ raw: Any?) -> Int? {
-        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        return Int(exactly: number.doubleValue)
     }
 }
 

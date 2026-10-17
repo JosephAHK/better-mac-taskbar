@@ -10,6 +10,8 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 
 - Frosted-glass bottom taskbar
 - Per-window icons (Chrome / multi-window apps show separately)
+- Hover window previews with a close button; thumbnails when Screen Recording is granted (title cards otherwise, and on macOS 13)
+- Dock badges (unread counts) on task buttons, and "Not responding" apps dimmed like on Windows
 - Center or left-aligned icons
 - Start menu with pinned apps and type-to-search across installed apps (configurable Start hotkey; default Windows / ⌘ alone unhides the taskbar)
 - Clock, tray, Show Desktop
@@ -79,11 +81,12 @@ Menu bar icon → **Settings…**, or Start → Settings:
 
 - Center taskbar icons
 - Taskbar buttons: **Compact** (icons only) or **Wide** (icons with window titles, like Windows 10/11)
+- Show window previews on hover. Thumbnails need **Screen Recording** (Settings → Permissions → Grant…); the app never asks for it on its own
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar
 - Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.
 - Launch at login (shows when it still needs approval in System Settings → Login Items)
-- Import / Export settings as JSON, and Reset to defaults
+- Reset to defaults
 
 ## Project layout
 
