@@ -334,6 +334,25 @@ private struct AppearancePage: View {
                             )
                         }
                     }
+                    Row(
+                        title: "Reveal speed",
+                        subtitle: "How long the taskbar takes to slide back in. 0 shows it instantly."
+                    ) {
+                        let range = TaskbarSettings.revealDurationRange
+                        AutoHideSliderControl(
+                            valueLabel: String(format: "%.2f s", store.revealDuration),
+                            isDefault: abs(store.revealDuration - TaskbarSettings.revealDurationDefault) < 0.001,
+                            onReset: {
+                                store.revealDuration = TaskbarSettings.revealDurationDefault
+                            }
+                        ) {
+                            SettingsSlider(
+                                value: $store.revealDuration,
+                                range: range.lowerBound...range.upperBound,
+                                tickMarks: 4
+                            )
+                        }
+                    }
                 }
                 Row(
                     title: "Button style",

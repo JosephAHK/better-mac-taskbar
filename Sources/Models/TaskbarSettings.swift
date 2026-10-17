@@ -159,6 +159,7 @@ final class TaskbarSettings: @unchecked Sendable {
         static let autoHideTaskbar = "autoHideTaskbar"
         static let autoHideRevealZone = "autoHideRevealZone"
         static let autoHideDelay = "autoHideDelay"
+        static let revealDuration = "autoHideRevealDuration"
         static let pinnedBundleIDs = "pinnedBundleIDs"
         static let hiddenBundleIDs = "hiddenBundleIDs"
         static let taskbarOrder = "taskbarOrder"
@@ -174,7 +175,7 @@ final class TaskbarSettings: @unchecked Sendable {
         static let userSettings = [
             centerIcons, buttonStyle, showWindowPreviews, windowPreviewDelay,
             replaceDock, autoHideTaskbar, autoHideRevealZone,
-            autoHideDelay, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
+            autoHideDelay, revealDuration, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
             startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly
         ]
     }
@@ -260,6 +261,25 @@ final class TaskbarSettings: @unchecked Sendable {
         set {
             let clamped = min(max(newValue, Self.autoHideRevealZoneRange.lowerBound), Self.autoHideRevealZoneRange.upperBound)
             defaults.set(clamped, forKey: Key.autoHideRevealZone)
+        }
+    }
+
+    /// Seconds an auto-hidden taskbar takes to slide back in. Capped at the original
+    /// slide: the setting exists to make reveal snappier, not slower.
+    static let revealDurationRange: ClosedRange<Double> = 0...0.18
+    static let revealDurationDefault: Double = 0.18
+
+    var revealDuration: Double {
+        get {
+            guard defaults.object(forKey: Key.revealDuration) != nil else {
+                return Self.revealDurationDefault
+            }
+            let raw = defaults.double(forKey: Key.revealDuration)
+            return min(max(raw, Self.revealDurationRange.lowerBound), Self.revealDurationRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.revealDurationRange.lowerBound), Self.revealDurationRange.upperBound)
+            defaults.set(clamped, forKey: Key.revealDuration)
         }
     }
 

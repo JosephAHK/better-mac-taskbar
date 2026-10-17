@@ -404,7 +404,9 @@ final class TaskbarPanelController {
             let generation: Int? = revealed ? nextRevealGeneration() : nil
             revealsInFlight[key] = generation
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = fades ? fadeDuration : slideDuration
+                // Reveal speed is the user's; hiding keeps the stock slide.
+                let duration = fades ? fadeDuration : slideDuration
+                context.duration = revealed ? min(duration, TaskbarSettings.shared.revealDuration) : duration
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 entry.panel.animator().setFrame(frame, display: true)
                 entry.panel.animator().alphaValue = alpha

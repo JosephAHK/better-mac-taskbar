@@ -85,6 +85,21 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var revealDuration: Double {
+        didSet {
+            // Snap to 0.01 s without Slider.step, which draws macOS tick marks.
+            let snapped = (revealDuration * 100).rounded() / 100
+            let clamped = min(max(snapped, TaskbarSettings.revealDurationRange.lowerBound),
+                              TaskbarSettings.revealDurationRange.upperBound)
+            if abs(revealDuration - clamped) > 0.0001 {
+                revealDuration = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.revealDuration) > 0.001 else { return }
+            TaskbarSettings.shared.revealDuration = clamped
+        }
+    }
+
     @Published var launchAtLogin: Bool {
         didSet {
             guard launchAtLogin != LaunchAtLogin.isRegistered else { return }
@@ -144,6 +159,7 @@ final class SettingsStore: ObservableObject {
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
+        revealDuration = TaskbarSettings.shared.revealDuration
         buttonStyle = TaskbarSettings.shared.buttonStyle
         showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
         windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
@@ -179,6 +195,7 @@ final class SettingsStore: ObservableObject {
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
+        revealDuration = TaskbarSettings.shared.revealDuration
         buttonStyle = TaskbarSettings.shared.buttonStyle
         showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
         windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
