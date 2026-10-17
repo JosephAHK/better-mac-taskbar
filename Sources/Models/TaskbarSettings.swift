@@ -155,6 +155,7 @@ final class TaskbarSettings: @unchecked Sendable {
         static let buttonStyle = "taskbarButtonStyle"
         static let showWindowPreviews = "showWindowPreviews"
         static let windowPreviewDelay = "windowPreviewDelay"
+        static let previewThumbnailWidth = "previewThumbnailWidth"
         static let replaceDock = "replaceDock"
         static let autoHideTaskbar = "autoHideTaskbar"
         static let autoHideRevealZone = "autoHideRevealZone"
@@ -173,7 +174,7 @@ final class TaskbarSettings: @unchecked Sendable {
         /// Everything the user chose. Excludes the one-shot prompt flags, which
         /// record what the app already asked rather than a preference.
         static let userSettings = [
-            centerIcons, buttonStyle, showWindowPreviews, windowPreviewDelay,
+            centerIcons, buttonStyle, showWindowPreviews, windowPreviewDelay, previewThumbnailWidth,
             replaceDock, autoHideTaskbar, autoHideRevealZone,
             autoHideDelay, revealDuration, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
             startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly
@@ -225,6 +226,27 @@ final class TaskbarSettings: @unchecked Sendable {
         set {
             let clamped = min(max(newValue, Self.windowPreviewDelayRange.lowerBound), Self.windowPreviewDelayRange.upperBound)
             defaults.set(clamped, forKey: Key.windowPreviewDelay)
+        }
+    }
+
+    /// Width of a preview thumbnail in points; height follows at 3:5. Captures are
+    /// taken at this size, so larger thumbnails also cost a little more per refresh.
+    static let previewThumbnailWidthRange: ClosedRange<Double> = 120...480
+    static let previewThumbnailWidthDefault: Double = 200
+
+    var previewThumbnailWidth: Double {
+        get {
+            guard defaults.object(forKey: Key.previewThumbnailWidth) != nil else {
+                return Self.previewThumbnailWidthDefault
+            }
+            let raw = defaults.double(forKey: Key.previewThumbnailWidth)
+            return min(max(raw, Self.previewThumbnailWidthRange.lowerBound), Self.previewThumbnailWidthRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.previewThumbnailWidthRange.lowerBound), Self.previewThumbnailWidthRange.upperBound)
+            defaults.set(clamped, forKey: Key.previewThumbnailWidth)
+            // An open preview was laid out at the old size; this closes it.
+            NotificationCenter.default.post(name: .taskbarSettingsChanged, object: nil)
         }
     }
 

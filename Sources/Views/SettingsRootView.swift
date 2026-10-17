@@ -384,7 +384,7 @@ private struct AppearancePage: View {
                     Row(
                         title: "Preview delay",
                         subtitle: "How long to rest the pointer on a button before its preview opens.",
-                        isLast: !showsThumbnailPermissionRow
+                        isLast: !showsThumbnailPermissionRow && !showsThumbnailSizeRow
                     ) {
                         let range = TaskbarSettings.windowPreviewDelayRange
                         AutoHideSliderControl(
@@ -402,6 +402,28 @@ private struct AppearancePage: View {
                         }
                     }
                 }
+                if showsThumbnailSizeRow {
+                    Row(
+                        title: "Thumbnail size",
+                        subtitle: "Width of the window image in a preview.",
+                        isLast: true
+                    ) {
+                        let range = TaskbarSettings.previewThumbnailWidthRange
+                        AutoHideSliderControl(
+                            valueLabel: "\(Int(store.previewThumbnailWidth)) pt",
+                            isDefault: abs(store.previewThumbnailWidth - TaskbarSettings.previewThumbnailWidthDefault) < 0.5,
+                            onReset: {
+                                store.previewThumbnailWidth = TaskbarSettings.previewThumbnailWidthDefault
+                            }
+                        ) {
+                            SettingsSlider(
+                                value: $store.previewThumbnailWidth,
+                                range: range.lowerBound...range.upperBound,
+                                tickMarks: 4
+                            )
+                        }
+                    }
+                }
                 if showsThumbnailPermissionRow {
                     Row(
                         title: "Thumbnails need Screen Recording",
@@ -413,6 +435,11 @@ private struct AppearancePage: View {
                 }
             }
         }
+    }
+
+    /// Only once thumbnails can actually be shown; title cards have no image to size.
+    private var showsThumbnailSizeRow: Bool {
+        store.showWindowPreviews && store.windowThumbnailsSupported && store.screenRecordingGranted
     }
 
     private var showsThumbnailPermissionRow: Bool {

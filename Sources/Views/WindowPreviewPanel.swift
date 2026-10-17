@@ -345,8 +345,12 @@ final class WindowPreviewView: NSView {
     var onClose: ((WindowInfo) -> Void)?
     var onShowThumbnailSettings: (() -> Void)?
 
-    /// Largest thumbnail, in points. Captures are scaled to fit inside it.
-    static let thumbnailSize = NSSize(width: 200, height: 120)
+    /// Largest thumbnail, in points (Settings → Thumbnail size). Captures are scaled
+    /// to fit inside it.
+    static var thumbnailSize: NSSize {
+        let width = TaskbarSettings.shared.previewThumbnailWidth
+        return NSSize(width: width, height: (width * 0.6).rounded())
+    }
     private static let padding: CGFloat = 8
 
     private let effect = NSVisualEffectView()
@@ -459,7 +463,7 @@ private final class WindowPreviewCard: NSView {
     var onActivate: (() -> Void)?
     var onClose: (() -> Void)?
 
-    private static let width = WindowPreviewView.thumbnailSize.width + 16
+    private static var width: CGFloat { WindowPreviewView.thumbnailSize.width + 16 }
     private static let titleOnlyWidth: CGFloat = 260
     private static let headerHeight: CGFloat = 28
     private static let placeholderIconSize: CGFloat = 48

@@ -91,7 +91,7 @@ Menu bar icon → **Settings…**, or Start → Settings:
 
 - Center taskbar icons
 - Taskbar buttons: **Compact** (icons only) or **Wide** (icons with window titles, like Windows 10/11)
-- Show window previews on hover, and the **Preview delay** before they open (it starts once an auto-hidden bar has finished revealing). Thumbnails need **Screen Recording**; the app never asks for it on its own
+- Show window previews on hover, and the **Preview delay** before they open (it starts once an auto-hidden bar has finished revealing), and the **Thumbnail size**. Thumbnails need **Screen Recording**; the app never asks for it on its own
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar, with **Reveal zone** (how close to the edge the pointer must get), **Hide delay**, and **Reveal speed** (0–0.18 s; 0 shows it instantly)
 - Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.

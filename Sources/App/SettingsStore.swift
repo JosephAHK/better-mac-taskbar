@@ -51,6 +51,21 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var previewThumbnailWidth: Double {
+        didSet {
+            // Snap to 10 pt without Slider.step, which draws macOS tick marks.
+            let snapped = (previewThumbnailWidth / 10).rounded() * 10
+            let clamped = min(max(snapped, TaskbarSettings.previewThumbnailWidthRange.lowerBound),
+                              TaskbarSettings.previewThumbnailWidthRange.upperBound)
+            if abs(previewThumbnailWidth - clamped) > 0.0001 {
+                previewThumbnailWidth = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.previewThumbnailWidth) > 0.5 else { return }
+            TaskbarSettings.shared.previewThumbnailWidth = clamped
+        }
+    }
+
     /// Set by code outside the window (the preview flyout's thumbnail hint) to open
     /// Settings on a particular page; the root view consumes and clears it.
     @Published var requestedPage: SettingsRootView.Section?
@@ -163,6 +178,7 @@ final class SettingsStore: ObservableObject {
         buttonStyle = TaskbarSettings.shared.buttonStyle
         showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
         windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
+        previewThumbnailWidth = TaskbarSettings.shared.previewThumbnailWidth
         launchAtLogin = LaunchAtLogin.isRegistered
         launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
@@ -199,6 +215,7 @@ final class SettingsStore: ObservableObject {
         buttonStyle = TaskbarSettings.shared.buttonStyle
         showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
         windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
+        previewThumbnailWidth = TaskbarSettings.shared.previewThumbnailWidth
         reloadHiddenApps()
         reloadHotkey()
     }
