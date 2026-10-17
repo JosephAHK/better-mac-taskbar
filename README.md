@@ -10,7 +10,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 
 - Frosted-glass bottom taskbar
 - Per-window icons (Chrome / multi-window apps show separately)
-- Hover window previews with a close button; thumbnails when Screen Recording is granted (title cards otherwise, and on macOS 13)
+- Hover window previews with a close button (or middle-click the preview); thumbnails when Screen Recording is granted (title cards otherwise, and on macOS 13)
 - Dock badges (unread counts) on task buttons, and "Not responding" apps dimmed like on Windows
 - Center or left-aligned icons
 - Buttons that don't fit go into an overflow (») menu instead of sliding under the tray

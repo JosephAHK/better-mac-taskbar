@@ -614,6 +614,16 @@ private final class WindowPreviewCard: NSView {
         onActivate?()
     }
 
+    // Middle-click closes, as on the task button itself. Acted on at release over
+    // the card, like a normal click, so pressing and dragging off cancels it.
+    override func otherMouseDown(with event: NSEvent) {}
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2,
+              bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onClose?()
+    }
+
     @objc private func closeClicked() {
         onClose?()
     }
