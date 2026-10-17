@@ -405,7 +405,7 @@ private struct AppearancePage: View {
                 if showsThumbnailSizeRow {
                     Row(
                         title: "Thumbnail size",
-                        subtitle: "Width of the window image in a preview.",
+                        subtitle: "Largest width of the window image in a preview; it keeps the window's shape.",
                         isLast: true
                     ) {
                         let range = TaskbarSettings.previewThumbnailWidthRange

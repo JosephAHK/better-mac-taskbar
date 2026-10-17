@@ -284,10 +284,11 @@ final class WindowPreviewController {
               let windowID = anchor?.windowInfo.cgWindowID,
               capturesInFlight.insert(windowID).inserted else { return }
         let scale = panel.backingScaleFactor
+        let thumbnailSize = panel.preview.thumbnailSize
         Task {
             let image = await WindowThumbnailer.shared.image(
                 of: windowID,
-                fitting: WindowPreviewView.thumbnailSize,
+                fitting: thumbnailSize,
                 scale: scale
             )
             self.thumbnailArrived(image, for: windowID, scale: scale)
@@ -345,17 +346,37 @@ final class WindowPreviewView: NSView {
     var onClose: ((WindowInfo) -> Void)?
     var onShowThumbnailSettings: (() -> Void)?
 
-    /// Largest thumbnail, in points (Settings → Thumbnail size). Captures are scaled
-    /// to fit inside it.
-    static var thumbnailSize: NSSize {
-        let width = TaskbarSettings.shared.previewThumbnailWidth
-        return NSSize(width: width, height: (width * 0.6).rounded())
+    /// The window's own shape fitted inside the Thumbnail size box (the set width,
+    /// at most 3:4 of it tall), so the card hugs the image instead of letterboxing a
+    /// fixed box. Read from the window server, which knows the frame before any
+    /// capture lands.
+    static func thumbnailSize(for info: WindowInfo) -> NSSize {
+        let maxWidth = TaskbarSettings.shared.previewThumbnailWidth
+        let maxHeight = (maxWidth * 0.75).rounded()
+        guard let aspect = aspectRatio(of: info.cgWindowID) else {
+            return NSSize(width: maxWidth, height: (maxWidth * 0.625).rounded())
+        }
+        if aspect >= maxWidth / maxHeight {
+            return NSSize(width: maxWidth, height: (maxWidth / aspect).rounded())
+        }
+        return NSSize(width: (maxHeight * aspect).rounded(), height: maxHeight)
+    }
+
+    private static func aspectRatio(of windowID: CGWindowID?) -> CGFloat? {
+        guard let windowID,
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+              let bounds = list.first?[kCGWindowBounds as String] as? [String: CGFloat],
+              let width = bounds["Width"], let height = bounds["Height"],
+              width > 0, height > 0 else { return nil }
+        return width / height
     }
     private static let padding: CGFloat = 8
 
     private let effect = NSVisualEffectView()
     private let tint = NSView()
     private var card: WindowPreviewCard?
+    /// Image area of the current card; captures are taken at this size.
+    private(set) var thumbnailSize = NSSize.zero
     private var tracking: NSTrackingArea?
     /// Shown instead of a thumbnail while Screen Recording isn't granted: without it
     /// the title card gives no hint that images are possible, or where to turn them on.
@@ -395,7 +416,12 @@ final class WindowPreviewView: NSView {
         showsThumbnailHint: Bool
     ) {
         card?.removeFromSuperview()
-        let card = WindowPreviewCard(info: info, notResponding: notResponding, showsThumbnail: showsThumbnail)
+        thumbnailSize = Self.thumbnailSize(for: info)
+        let card = WindowPreviewCard(
+            info: info,
+            notResponding: notResponding,
+            thumbnailSize: showsThumbnail ? thumbnailSize : nil
+        )
         card.onActivate = { [weak self] in self?.onActivate?(info) }
         card.onClose = { [weak self] in self?.onClose?(info) }
         if let thumbnail {
@@ -463,7 +489,8 @@ private final class WindowPreviewCard: NSView {
     var onActivate: (() -> Void)?
     var onClose: (() -> Void)?
 
-    private static var width: CGFloat { WindowPreviewView.thumbnailSize.width + 16 }
+    /// Narrow or tall windows still leave room for the title and close button.
+    private static let minimumThumbnailCardWidth: CGFloat = 180
     private static let titleOnlyWidth: CGFloat = 260
     private static let headerHeight: CGFloat = 28
     private static let placeholderIconSize: CGFloat = 48
@@ -479,18 +506,13 @@ private final class WindowPreviewCard: NSView {
     private var tracking: NSTrackingArea?
     private var isHovered = false
 
-    init(info: WindowInfo, notResponding: Bool, showsThumbnail: Bool) {
+    /// `thumbnailSize` nil means a title-only card.
+    init(info: WindowInfo, notResponding: Bool, thumbnailSize: NSSize?) {
         self.info = info
-        self.showsThumbnail = showsThumbnail
-        let height = showsThumbnail
-            ? Self.headerHeight + WindowPreviewView.thumbnailSize.height + 8
-            : Self.headerHeight
-        super.init(frame: NSRect(
-            x: 0,
-            y: 0,
-            width: showsThumbnail ? Self.width : Self.titleOnlyWidth,
-            height: height
-        ))
+        self.showsThumbnail = thumbnailSize != nil
+        let width = thumbnailSize.map { max($0.width + 16, Self.minimumThumbnailCardWidth) } ?? Self.titleOnlyWidth
+        let height = thumbnailSize.map { Self.headerHeight + $0.height + 8 } ?? Self.headerHeight
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
         layer?.cornerRadius = 5
 
@@ -521,12 +543,12 @@ private final class WindowPreviewCard: NSView {
         titleLabel.frame = NSRect(x: iconView.frame.maxX + 6, y: headerY + 6, width: closeButton.frame.minX - iconView.frame.maxX - 10, height: 16)
         addSubview(titleLabel)
 
-        if showsThumbnail {
+        if let thumbnailSize {
             let area = NSRect(
-                x: (bounds.width - WindowPreviewView.thumbnailSize.width) / 2,
+                x: ((bounds.width - thumbnailSize.width) / 2).rounded(),
                 y: 4,
-                width: WindowPreviewView.thumbnailSize.width,
-                height: WindowPreviewView.thumbnailSize.height
+                width: thumbnailSize.width,
+                height: thumbnailSize.height
             )
             thumbnailView.frame = area
             thumbnailView.imageScaling = .scaleProportionallyDown
