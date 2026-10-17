@@ -21,11 +21,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func show() {
-        NSApp.setActivationPolicy(.accessory)
         SettingsStore.shared.refresh()
         SettingsStore.shared.startWatchingAccessibility()
         window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Login-item approval and Accessibility are granted in System Settings, so
+    /// coming back from there is exactly when they change.
+    func windowDidBecomeKey(_ notification: Notification) {
+        SettingsStore.shared.refreshSystemStatus()
+    }
+
+    /// The recorder's monitors are local, so once the user switches away it would
+    /// sit there with the global Start hotkey suspended and nothing to finish it.
+    func windowDidResignKey(_ notification: Notification) {
+        HotkeyRecorder.shared.cancel()
     }
 
     func windowWillClose(_ notification: Notification) {

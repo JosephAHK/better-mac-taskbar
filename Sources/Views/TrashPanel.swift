@@ -2,9 +2,16 @@ import AppKit
 
 /// Taskbar Trash button — browse, restore, or empty the Trash without opening Finder.
 final class TrashButtonView: TrayItemButtonView {
+    /// Keeps the can's full/empty state live when Finder (or anything else) changes
+    /// the Trash. Nil if ~/.Trash can't be opened; the icon then still refreshes on hover.
+    private var trashWatcher: DirectoryWatcher?
+
     init() {
         super.init(title: "Trash")
         refreshIcon()
+        trashWatcher = DirectoryWatcher(url: TrashPanelView.trashRootURL()) { [weak self] in
+            self?.refreshIcon()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -19,15 +26,18 @@ final class TrashButtonView: TrayItemButtonView {
         iconView.image = NSImage(named: name)
     }
 
+    /// Stops at the first visible item — this runs on every Trash change and hover,
+    /// and listing a large Trash in full each time would stall the main thread.
     private static func isTrashEmpty() -> Bool {
-        let contents = try? FileManager.default.contentsOfDirectory(
+        let enumerator = FileManager.default.enumerator(
             at: TrashPanelView.trashRootURL(),
             includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants],
+            // Unreadable Trash reads as empty: showing a full can for a folder we cannot
+            // enumerate would be a permanent false positive.
+            errorHandler: { _, _ in false }
         )
-        // Unreadable Trash reads as empty: showing a full can for a folder we cannot
-        // enumerate would be a permanent false positive.
-        return contents?.isEmpty ?? true
+        return enumerator?.nextObject() == nil
     }
 }
 
@@ -37,6 +47,7 @@ private final class TrashKeyablePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+@MainActor
 final class TrashPanelController {
     static let shared = TrashPanelController()
 
@@ -45,6 +56,9 @@ final class TrashPanelController {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var isDraggingFile = false
+    private lazy var focus = FlyoutFocus { [weak self] in
+        self?.hide(restoringFocus: false)
+    }
 
     var isVisible: Bool { panel?.isVisible == true }
 
@@ -58,8 +72,12 @@ final class TrashPanelController {
         }
     }
 
-    func hide() {
+    /// `restoringFocus: false` when whatever caused the hide moves focus itself.
+    func hide(restoringFocus: Bool = true) {
         let wasVisible = panel != nil
+        if wasVisible {
+            focus.end(restoringFocus: restoringFocus)
+        }
         removeMonitors()
         panel?.orderOut(nil)
         panel = nil
@@ -84,10 +102,10 @@ final class TrashPanelController {
         let content = TrashPanelView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         content.onOpenInFinder = { [weak self] url in
             NSWorkspace.shared.open(url)
-            self?.hide()
+            self?.hide(restoringFocus: false)
         }
         content.onFileOpened = { [weak self] in
-            self?.hide()
+            self?.hide(restoringFocus: false)
         }
         content.onRequestClose = { [weak self] in
             self?.hide()
@@ -97,11 +115,6 @@ final class TrashPanelController {
         }
         content.onDragEnded = { [weak self] in
             self?.isDraggingFile = false
-        }
-        content.onEmptiedTrash = { [weak self] in
-            if let button = self?.anchor as? TrashButtonView {
-                button.refreshIcon()
-            }
         }
 
         let panel = TrashKeyablePanel(
@@ -118,7 +131,10 @@ final class TrashPanelController {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
         panel.worksWhenModal = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Out of full-screen Spaces like the bar it opens from; dark like the bar
+        // regardless of the system theme (its text is labelColor on a dark tint).
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = content
 
         let screenFrame = window.convertToScreen(view.convert(view.bounds, to: nil))
@@ -126,8 +142,7 @@ final class TrashPanelController {
         let y = screenFrame.maxY + 2
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
 
-        // Accessory (LSUIElement) apps must activate before a panel can take keyboard focus.
-        NSApp.activate(ignoringOtherApps: true)
+        focus.begin()
         panel.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async {
             content.focusSearch()
@@ -152,19 +167,18 @@ final class TrashPanelController {
             self.handleMouseDown(event)
             return event
         }
+        // A click in another app focuses that app; handing focus back would steal it.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, !self.isDraggingFile else { return }
-            self.hide()
+            self.hide(restoringFocus: false)
         }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
-        guard isVisible else { return event }
+        guard isVisible, let content = panel?.contentView as? TrashPanelView else { return event }
         if event.keyCode == 53 { // Escape
-            if let content = panel?.contentView as? TrashPanelView, content.hasSearchQuery {
-                return event
-            }
-            hide()
+            // Handled here rather than by the search field, which only sees it while focused.
+            content.handleEscape()
             return nil
         }
         return event
@@ -189,15 +203,10 @@ final class TrashPanelController {
             let anchorScreen = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
             if anchorScreen.contains(location) { return }
         }
-        hide()
+        // A click elsewhere on the taskbar leaves focus on the taskbar, as on Windows —
+        // and may be a task button activating its own app.
+        hide(restoringFocus: false)
     }
-}
-
-/// One directory listing entry — carries `isDirectory` alongside the URL so
-/// activation logic doesn't need to re-stat the filesystem on every click.
-private struct TrashEntry {
-    let url: URL
-    let isDirectory: Bool
 }
 
 final class TrashPanelView: NSView, NSSearchFieldDelegate {
@@ -206,19 +215,21 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     var onRequestClose: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
-    /// Fired after Empty Trash completes, so the tray icon can refresh to its empty state.
-    var onEmptiedTrash: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "Trash")
     private let backButton = NSButton()
     private let searchField = NSSearchField()
     private let scroll = NSScrollView()
     private let stack = NSStackView()
-    private var folderWatcher: DispatchSourceFileSystemObject?
-    private var folderFD: Int32 = -1
-    private var allFiles: [TrashEntry] = []
-    private var filteredFiles: [TrashEntry] = []
+    private let loader = FolderLoader()
+    private var folderWatcher: DirectoryWatcher?
+    /// Nil until the current folder's first listing arrives, so a folder that is
+    /// still loading doesn't flash "empty".
+    private var listing: [FolderEntry]?
+    private var filteredFiles: [FolderEntry] = []
+    private var rowCache = FolderRowCache<TrashFileRow>()
     private var needsFullDiskAccess = false
+    private var isEmptying = false
     private lazy var currentURL: URL = Self.trashRootURL()
     private var backStack: [URL] = []
     private var isAtRoot: Bool { backStack.isEmpty }
@@ -277,7 +288,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         openButton.bezelStyle = .inline
         openButton.isBordered = false
         openButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        openButton.contentTintColor = NSColor(calibratedRed: 0.35, green: 0.72, blue: 1, alpha: 1)
+        openButton.contentTintColor = .controlAccentColor
         openButton.translatesAutoresizingMaskIntoConstraints = false
 
         searchField.placeholderString = "Search trash"
@@ -349,10 +360,6 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    deinit {
-        stopWatching()
-    }
-
     func focusSearch() {
         guard let window else { return }
         window.makeKey()
@@ -364,21 +371,26 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
 
     override var acceptsFirstResponder: Bool { true }
 
-    var hasSearchQuery: Bool {
-        !searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     @objc private func openFinder() {
         onOpenInFinder?(currentURL)
     }
 
     @objc private func goBack() {
         guard let previous = backStack.popLast() else { return }
-        currentURL = previous
-        searchField.stringValue = ""
-        updateHeader()
-        reloadFromDisk()
-        startWatching()
+        show(folder: previous)
+    }
+
+    /// Escape steps out one level at a time: clear the search, then go back up a
+    /// folder, and only close from the top level.
+    func handleEscape() {
+        if !searchField.stringValue.isEmpty {
+            searchField.stringValue = ""
+            applyFilter()
+        } else if !isAtRoot {
+            goBack()
+        } else {
+            onRequestClose?()
+        }
     }
 
     @objc private func emptyTapped() {
@@ -391,22 +403,52 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         if #available(macOS 11.0, *) {
             alert.buttons.first?.hasDestructiveAction = true
         }
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !isEmptying, alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let root = Self.trashRootURL()
-        DispatchQueue.global(qos: .userInitiated).async {
-            var error: NSDictionary?
-            NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
-            TrashOriginStore.removeAll(under: root)
+        // osascript in a child process rather than NSAppleScript: NSAppleScript is only
+        // safe on the main thread, and the Apple event can block for as long as Finder
+        // takes to answer (up to the 2-minute AppleScript timeout), freezing the taskbar.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "tell application \"Finder\" to empty trash"]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { finished in
+            let status = finished.terminationStatus
+            let stderr = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             DispatchQueue.main.async { [weak self] in
-                self?.backStack.removeAll()
-                self?.currentURL = root
-                self?.updateHeader()
-                self?.reloadFromDisk()
-                self?.startWatching()
-                self?.onEmptiedTrash?()
+                self?.finishEmptying(status: status, stderr: stderr)
             }
         }
+        do {
+            try process.run()
+            isEmptying = true
+        } catch {
+            ErrorAlert.show(title: "Couldn’t Empty the Trash", message: error.localizedDescription)
+        }
+    }
+
+    private func finishEmptying(status: Int32, stderr: String) {
+        isEmptying = false
+        guard status == 0 else {
+            // osascript reports failures as "…: <message> (<code>)" on stderr.
+            let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let code = message.range(of: #"\((-?\d+)\)$"#, options: .regularExpression)
+                .flatMap { Int(message[$0].dropFirst().dropLast()) }
+            AppLog.info("empty trash failed", ["status": status, "error": message])
+            ErrorAlert.showAppleScriptFailure(
+                title: "Couldn’t Empty the Trash",
+                targetApp: "Finder",
+                code: code,
+                message: message.isEmpty ? "Finder didn’t empty the Trash." : message
+            )
+            return
+        }
+        let root = Self.trashRootURL()
+        TrashOriginStore.removeAll(under: root)
+        backStack.removeAll()
+        show(folder: root)
     }
 
     @objc private func searchChanged(_ sender: NSSearchField) {
@@ -419,14 +461,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(cancelOperation(_:)) {
-            if !searchField.stringValue.isEmpty {
-                searchField.stringValue = ""
-                applyFilter()
-            } else if !isAtRoot {
-                goBack()
-            } else {
-                onRequestClose?()
-            }
+            handleEscape()
             return true
         }
         if commandSelector == #selector(insertNewline(_:)) {
@@ -442,7 +477,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     }
 
     /// Navigate into a folder in-place, or open a file with its default app.
-    private func activate(_ entry: TrashEntry) {
+    private func activate(_ entry: FolderEntry) {
         if entry.isDirectory {
             navigate(to: entry.url)
         } else {
@@ -453,9 +488,15 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
 
     private func navigate(to url: URL) {
         backStack.append(currentURL)
+        show(folder: url)
+    }
+
+    private func show(folder url: URL) {
         currentURL = url
         searchField.stringValue = ""
+        listing = nil
         updateHeader()
+        applyFilter()
         reloadFromDisk()
         startWatching()
     }
@@ -468,76 +509,92 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     /// Restore only works reliably for items this app itself trashed (tracked origin) —
     /// items Finder trashed (or trashed before this store existed) have no known origin,
     /// so we tell the user rather than guessing a destination.
-    private func restore(_ entry: TrashEntry) {
-        guard let original = TrashOriginStore.originalURL(for: entry.url) else {
-            showAlert(
-                title: "Can’t Restore “\(entry.url.lastPathComponent)”",
+    private func restore(_ entry: FolderEntry) {
+        let name = entry.url.lastPathComponent
+        let original: URL
+        switch TrashOriginStore.origin(for: entry.url) {
+        case .verified(let url):
+            original = url
+        case .unverified(let url):
+            guard confirmUnverifiedRestore(name: name, to: url.deletingLastPathComponent()) else { return }
+            original = url
+        case nil:
+            ErrorAlert.show(
+                title: "Can’t Restore “\(name)”",
                 message: "Better Mac Taskbar doesn’t know where this item was trashed from. Use Finder’s Trash (right-click → Put Back) instead."
             )
             return
         }
+
         let fm = FileManager.default
         let parent = original.deletingLastPathComponent()
         guard fm.fileExists(atPath: parent.path) else {
-            showAlert(
-                title: "Can’t Restore “\(entry.url.lastPathComponent)”",
-                message: "Its original folder no longer exists."
-            )
+            ErrorAlert.show(title: "Can’t Restore “\(name)”", message: "Its original folder no longer exists.")
             return
         }
-        var destination = original
-        if fm.fileExists(atPath: destination.path) {
-            let ext = destination.pathExtension
-            let base = destination.deletingPathExtension().lastPathComponent
-            destination = ext.isEmpty
-                ? parent.appendingPathComponent("\(base) (Restored)")
-                : parent.appendingPathComponent("\(base) (Restored)").appendingPathExtension(ext)
-        }
+        let destination = Self.availableRestoreURL(for: original)
         do {
             try fm.moveItem(at: entry.url, to: destination)
             TrashOriginStore.remove(trashedURL: entry.url)
             reloadFromDisk()
         } catch {
-            showAlert(title: "Couldn’t Restore “\(entry.url.lastPathComponent)”", message: error.localizedDescription)
+            ErrorAlert.show(title: "Couldn’t Restore “\(name)”", message: error.localizedDescription)
         }
     }
 
-    private func showAlert(title: String, message: String) {
+    /// Origins recorded by older versions carry no file identity, so the record may
+    /// belong to an earlier item with the same name that has since been emptied.
+    private func confirmUnverifiedRestore(name: String, to folder: URL) -> Bool {
         let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        alert.messageText = "Restore “\(name)” to “\(folder.lastPathComponent)”?"
+        alert.informativeText = "An item with this name was trashed from \(folder.path), but Better Mac Taskbar can’t confirm it’s this one."
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Extensions that read as one unit, so `a.tar.gz` becomes `a (Restored).tar.gz`.
+    private static let compoundExtensions = ["tar.gz", "tar.bz2", "tar.xz"]
+
+    /// `original` if free, else "name (Restored).ext", "name (Restored 2).ext", …
+    private static func availableRestoreURL(for original: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: original.path) else { return original }
+
+        let parent = original.deletingLastPathComponent()
+        let fileName = original.lastPathComponent
+        let lowered = fileName.lowercased()
+        let ext = compoundExtensions.first { lowered.hasSuffix(".\($0)") && lowered.count > $0.count + 1 }
+            .map { String(fileName.suffix($0.count)) }
+            ?? original.pathExtension
+        let base = ext.isEmpty ? fileName : String(fileName.dropLast(ext.count + 1))
+
+        var attempt = 1
+        while true {
+            let suffix = attempt == 1 ? " (Restored)" : " (Restored \(attempt))"
+            let candidateName = ext.isEmpty ? base + suffix : "\(base)\(suffix).\(ext)"
+            let candidate = parent.appendingPathComponent(candidateName)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            attempt += 1
+        }
     }
 
     private func reloadFromDisk() {
-        let url = currentURL
-        let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .nameKey]
-        do {
-            let files = try fm.contentsOfDirectory(
-                at: url,
-                includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles]
-            )
-            needsFullDiskAccess = false
-            let entries = files.map { fileURL in
-                let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                return TrashEntry(url: fileURL, isDirectory: isDirectory)
+        loader.load(currentURL) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let entries):
+                self.needsFullDiskAccess = false
+                self.listing = entries
+            case .failure(let error):
+                // ~/.Trash is TCC-protected — without Full Disk Access this throws
+                // NSFileReadNoPermissionError and would otherwise look like "Trash is empty".
+                self.needsFullDiskAccess = (error as NSError).code == NSFileReadNoPermissionError
+                self.listing = []
             }
-            allFiles = entries.sorted { a, b in
-                let da = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let db = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return da > db
-            }
-        } catch {
-            // ~/.Trash is TCC-protected — without Full Disk Access this throws
-            // NSFileReadNoPermissionError and would otherwise look like "Trash is empty".
-            needsFullDiskAccess = (error as NSError).code == 257
-            allFiles = []
+            self.applyFilter()
         }
-        applyFilter()
     }
 
     @objc private func openFullDiskAccessSettings() {
@@ -547,72 +604,58 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
     }
 
     private func applyFilter() {
-        stack.arrangedSubviews.forEach {
-            stack.removeArrangedSubview($0)
-            $0.removeFromSuperview()
+        guard let listing else {
+            filteredFiles = []
+            FolderList.setRows([], in: stack)
+            return
         }
 
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.isEmpty {
-            filteredFiles = allFiles
-        } else {
-            let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
-            filteredFiles = allFiles.filter { entry in
-                let name = entry.url.lastPathComponent
-                return tokens.allSatisfy { name.localizedCaseInsensitiveContains($0) }
-            }
-        }
+        filteredFiles = FolderList.filter(listing, query: query)
+        let rowWidth = max(bounds.width - 16, 300)
 
         if needsFullDiskAccess {
-            addFullDiskAccessMessage()
+            FolderList.setRows([fullDiskAccessMessage], in: stack)
             return
         }
 
         if filteredFiles.isEmpty {
-            let message = allFiles.isEmpty
+            let message = listing.isEmpty
                 ? (isAtRoot ? "Trash is empty" : "This folder is empty")
                 : "No matches"
-            let empty = NSTextField(labelWithString: message)
-            empty.font = NSFont.systemFont(ofSize: 13)
-            empty.textColor = .secondaryLabelColor
-            empty.alignment = .center
-            empty.translatesAutoresizingMaskIntoConstraints = false
-            let wrap = NSView()
-            wrap.translatesAutoresizingMaskIntoConstraints = false
-            wrap.addSubview(empty)
-            NSLayoutConstraint.activate([
-                wrap.heightAnchor.constraint(equalToConstant: 80),
-                empty.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
-                empty.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-                wrap.widthAnchor.constraint(equalToConstant: bounds.width - 16)
-            ])
-            stack.addArrangedSubview(wrap)
+            FolderList.setRows([rowCache.messageRow(message, width: rowWidth)], in: stack)
             return
         }
 
-        // Cap the unfiltered list for responsiveness; show every match when searching.
-        let displayed = query.isEmpty ? Array(filteredFiles.prefix(150)) : filteredFiles
-        let rowWidth = max(bounds.width - 16, 300)
-        let allowsRestore = isAtRoot
-        for entry in displayed {
-            let row = TrashFileRow(entry: entry, width: rowWidth, allowsRestore: allowsRestore)
-            row.onOpen = { [weak self] in
-                self?.activate(entry)
-            }
-            row.onReveal = {
-                NSWorkspace.shared.activateFileViewerSelecting([entry.url])
-            }
-            row.onRestore = { [weak self] in
-                self?.restore(entry)
-            }
-            row.onDragBegan = { [weak self] in self?.onDragBegan?() }
-            row.onDragEnded = { [weak self] in self?.onDragEnded?() }
-            stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
+        let displayed = Array(filteredFiles.prefix(FolderList.displayLimit))
+        var rows: [NSView] = rowCache.rows(for: displayed) { makeRow(for: $0, width: rowWidth) }
+        if filteredFiles.count > displayed.count {
+            let overflow = FolderList.overflowText(hiddenCount: filteredFiles.count - displayed.count)
+            rows.append(rowCache.messageRow(overflow, width: rowWidth, height: 36))
         }
+        FolderList.setRows(rows, in: stack)
     }
 
-    private func addFullDiskAccessMessage() {
+    private func makeRow(for entry: FolderEntry, width: CGFloat) -> TrashFileRow {
+        let row = TrashFileRow(entry: entry, width: width, allowsRestore: isAtRoot)
+        row.onOpen = { [weak self] in
+            self?.activate(entry)
+        }
+        row.onReveal = {
+            NSWorkspace.shared.activateFileViewerSelecting([entry.url])
+        }
+        row.onRestore = { [weak self] in
+            self?.restore(entry)
+        }
+        row.onDragBegan = { [weak self] in self?.onDragBegan?() }
+        row.onDragEnded = { [weak self] in self?.onDragEnded?() }
+        row.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return row
+    }
+
+    private lazy var fullDiskAccessMessage: NSView = makeFullDiskAccessMessage()
+
+    private func makeFullDiskAccessMessage() -> NSView {
         let message = NSTextField(wrappingLabelWithString: "Better Mac Taskbar needs Full Disk Access to show what’s in the Trash.")
         message.font = NSFont.systemFont(ofSize: 13)
         message.textColor = .secondaryLabelColor
@@ -627,7 +670,7 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
         openSettings.bezelStyle = .inline
         openSettings.isBordered = false
         openSettings.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        openSettings.contentTintColor = NSColor(calibratedRed: 0.35, green: 0.72, blue: 1, alpha: 1)
+        openSettings.contentTintColor = .controlAccentColor
         openSettings.translatesAutoresizingMaskIntoConstraints = false
 
         let column = NSStackView(views: [message, openSettings])
@@ -647,35 +690,13 @@ final class TrashPanelView: NSView, NSSearchFieldDelegate {
             column.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
             message.widthAnchor.constraint(equalToConstant: rowWidth - 32)
         ])
-        stack.addArrangedSubview(wrap)
+        return wrap
     }
 
     private func startWatching() {
-        stopWatching()
-        let path = currentURL.path
-        folderFD = open(path, O_EVTONLY)
-        guard folderFD >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: folderFD,
-            eventMask: [.write, .rename, .delete, .extend, .attrib],
-            queue: .main
-        )
-        source.setEventHandler { [weak self] in
+        folderWatcher = DirectoryWatcher(url: currentURL) { [weak self] in
             self?.reloadFromDisk()
         }
-        source.setCancelHandler { [weak self] in
-            if let self, self.folderFD >= 0 {
-                close(self.folderFD)
-                self.folderFD = -1
-            }
-        }
-        folderWatcher = source
-        source.resume()
-    }
-
-    private func stopWatching() {
-        folderWatcher?.cancel()
-        folderWatcher = nil
     }
 }
 
@@ -691,11 +712,12 @@ private final class TrashFileRow: NSView, NSDraggingSource {
     private let restoreButton = NSButton()
     private let iconView = NSImageView()
     private let allowsRestore: Bool
+    private var thumbnailRequest: Operation?
     private var tracking: NSTrackingArea?
     private var mouseDownPoint: NSPoint?
     private var didStartDrag = false
 
-    init(entry: TrashEntry, width: CGFloat, allowsRestore: Bool) {
+    init(entry: FolderEntry, width: CGFloat, allowsRestore: Bool) {
         self.url = entry.url
         self.isDirectory = entry.isDirectory
         self.allowsRestore = allowsRestore
@@ -708,8 +730,7 @@ private final class TrashFileRow: NSView, NSDraggingSource {
         iconView.image = NSWorkspace.shared.icon(forFile: url.path)
         addSubview(iconView)
         if !entry.isDirectory, ImageThumbnailer.isImage(url) {
-            ImageThumbnailer.thumbnail(for: url, maxPixelSize: 56) { [weak iconView] image in
-                guard let image else { return }
+            thumbnailRequest = ImageThumbnailer.thumbnail(for: url, modified: entry.modified, maxPixelSize: 56) { [weak iconView] image in
                 iconView?.image = image
             }
         }
@@ -748,6 +769,15 @@ private final class TrashFileRow: NSView, NSDraggingSource {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A row leaves its window when the list drops it or the panel closes; its
+    /// thumbnail is no longer worth decoding.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            thumbnailRequest?.cancel()
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

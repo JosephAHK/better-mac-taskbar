@@ -45,7 +45,8 @@ enum WindowDiagnostics {
     // MARK: - Change-only drop logging
 
     private static let lock = NSLock()
-    private static var lastDropSignatures: Set<String> = []
+    /// Guarded by `lock`.
+    nonisolated(unsafe) private static var lastDropSignatures: Set<String> = []
 
     /// Log drops that are new since the previous refresh, and note when a
     /// previously-dropped window stops being dropped.
@@ -135,7 +136,8 @@ enum WindowDiagnostics {
         ])
     }
 
-    private static var snapshotSignalSource: DispatchSourceSignal?
+    /// Written once at install; only held so the source stays alive.
+    nonisolated(unsafe) private static var snapshotSignalSource: DispatchSourceSignal?
 
     /// Write every AX window and every layer-0 CG window to the log, with the
     /// attributes enumeration filters actually key off. This is the ground truth
@@ -157,10 +159,10 @@ enum WindowDiagnostics {
 
             // Unfiltered AX window list — deliberately not AccessibilityService.windows(for:),
             // so windows that isStandardWindow rejects still show up here with their subrole.
-            let axApp = AXUIElementCreateApplication(pid)
+            let axApp = AccessibilityService.applicationElement(for: pid)
             var value: CFTypeRef?
             let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value)
-            let axWindows = (value as? [AXUIElement]) ?? []
+            let axWindows = AccessibilityService.axElements(value)
 
             AppLog.info("snapshot app", [
                 "app": name,

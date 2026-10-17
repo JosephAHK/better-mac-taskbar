@@ -1,6 +1,7 @@
 import AppKit
 
 @main
+@MainActor
 enum BetterMacTaskbarMain {
     static func main() {
         AppLog.bootstrap()

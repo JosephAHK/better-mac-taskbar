@@ -199,9 +199,19 @@ private struct GeneralPage: View {
                 Row(
                     title: "Launch at login",
                     subtitle: "Start Better Mac Taskbar automatically when you sign in.",
-                    isLast: true
+                    isLast: !store.launchAtLoginNeedsApproval
                 ) {
                     Toggle("", isOn: $store.launchAtLogin).settingsToggle()
+                }
+                if store.launchAtLoginNeedsApproval {
+                    Row(
+                        title: "Needs approval in System Settings",
+                        subtitle: "Login Items has Better Mac Taskbar switched off, so it won't open at login until you allow it there.",
+                        isLast: true
+                    ) {
+                        Button("Open Login Items…") { store.openLoginItemsSettings() }
+                            .controlSize(.small)
+                    }
                 }
             }
 
@@ -215,6 +225,27 @@ private struct GeneralPage: View {
                     isLast: true
                 ) {
                     Toggle("", isOn: $store.replaceDock).settingsToggle()
+                }
+            }
+
+            Card(title: "Settings") {
+                Row(
+                    title: "Import or export",
+                    subtitle: "A JSON file with every setting, including pinned apps, hidden apps and taskbar order."
+                ) {
+                    HStack(spacing: 8) {
+                        Button("Import…") { store.importSettings() }
+                        Button("Export…") { store.exportSettings() }
+                    }
+                    .controlSize(.small)
+                }
+                Row(
+                    title: "Reset to defaults",
+                    subtitle: "Also clears pinned apps, hidden apps and taskbar order. Launch at login is not changed.",
+                    isLast: true
+                ) {
+                    Button("Reset…") { store.resetToDefaults() }
+                        .controlSize(.small)
                 }
             }
 
@@ -380,7 +411,7 @@ private struct ShortcutsPage: View {
         VStack(alignment: .leading, spacing: 20) {
             Card(
                 title: "Start Menu",
-                footer: "Click the shortcut, then press the keys you want. A modifier on its own works too — press ⎋ to cancel."
+                footer: "Click the shortcut, then press a key with ⌘, ⌥ or ⌃ (F1–F20 work alone). A modifier on its own works too — press ⎋ to cancel."
             ) {
                 Row(
                     title: "Enable shortcut",
@@ -388,7 +419,7 @@ private struct ShortcutsPage: View {
                 ) {
                     Toggle("", isOn: $store.hotkeyEnabled).settingsToggle()
                 }
-                Row(title: "Shortcut", isLast: true) {
+                Row(title: "Shortcut", subtitle: recorder.rejectionHint, isLast: true) {
                     HStack(spacing: 8) {
                         KeyRecorderField(
                             display: store.hotkeyDisplay,
@@ -628,6 +659,7 @@ private struct SettingsSlider: NSViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator: NSObject {
         var parent: SettingsSlider
 

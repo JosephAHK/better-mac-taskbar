@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
@@ -8,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLog.info("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.accessory)
 
+        installMainMenu()
         setupStatusItem()
         WindowManager.shared.start()
         TaskbarPanelController.shared.show()
@@ -15,14 +17,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ensureAccessibility()
 
-        if !TaskbarSettings.shared.didConfigureLaunchAtLogin {
-            TaskbarSettings.shared.didConfigureLaunchAtLogin = true
-            _ = LaunchAtLogin.setEnabled(true)
-        }
-        AppLog.info("launchAtLogin", ["enabled": LaunchAtLogin.isEnabled])
+        AppLog.info("launchAtLogin", [
+            "registered": LaunchAtLogin.isRegistered,
+            "needsApproval": LaunchAtLogin.needsApproval
+        ])
 
         if TaskbarSettings.shared.replaceDock {
             DockManager.enableReplaceMode()
+        } else if DockManager.hasSavedOriginals {
+            // A previous run hid the Dock and never got to put it back (crash,
+            // force-quit, or the setting was turned off while it was dying).
+            AppLog.warn("Dock left hidden by a previous run — restoring")
+            DockManager.restoreDock()
         }
         AppLog.info("settings", [
             "replaceDock": TaskbarSettings.shared.replaceDock,
@@ -47,10 +53,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         StartHotkeyMonitor.shared.stop()
         WindowManager.shared.stop()
         TaskbarPanelController.shared.hide()
-        if TaskbarSettings.shared.replaceDock {
-            DockManager.restoreDock()
-        }
+        // Unconditional: it is a no-op unless we hid the Dock, and it also drains
+        // any apply still queued from a last-moment toggle. Blocking is the point —
+        // the process exits as soon as this method returns.
+        DockManager.restoreDock(waitUntilDone: true)
         AppLog.shutdown("applicationWillTerminate")
+    }
+
+    /// Accessory apps never show a menu bar, but AppKit still routes key
+    /// equivalents through `mainMenu` — without one, ⌘W/⌘Q and the text-editing
+    /// shortcuts do nothing in Settings or the Start menu search field.
+    private func installMainMenu() {
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(
+            title: "Quit Better Mac Taskbar",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ))
+
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+
+        let mainMenu = NSMenu()
+        for submenu in [appMenu, editMenu, windowMenu] {
+            let item = NSMenuItem()
+            item.submenu = submenu
+            mainMenu.addItem(item)
+        }
+        NSApp.mainMenu = mainMenu
     }
 
     private func setupStatusItem() {

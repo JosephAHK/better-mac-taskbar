@@ -1,25 +1,40 @@
 import AppKit
 import QuartzCore
 
+@MainActor
 final class TaskbarPanelController {
     static let shared = TaskbarPanelController()
 
-    private var panels: [ObjectIdentifier: (panel: NSPanel, screen: NSScreen)] = [:]
-    private var contentViews: [ObjectIdentifier: TaskbarContentView] = [:]
+    /// Panels are keyed by display ID rather than NSScreen identity: AppKit hands
+    /// back fresh NSScreen objects after every screen-parameter change, so identity
+    /// keys would make each change look like every screen was unplugged and replaced.
+    private typealias ScreenKey = CGDirectDisplayID
+
+    private struct Entry {
+        let panel: NSPanel
+        let content: TaskbarContentView
+        var screen: NSScreen
+    }
+
+    private var entries: [ScreenKey: Entry] = [:]
     private var observersRegistered = false
 
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
-    private var hideTimer: Timer?
+    private var hideTimers: [ScreenKey: Timer] = [:]
     private var keepVisibleCount = 0
-    private var revealedIDs: Set<ObjectIdentifier> = []
+    private var revealedKeys: Set<ScreenKey> = []
+    /// Auto-hide mode last applied. `.taskbarSettingsChanged` fires for every
+    /// setting, and re-running the hide pass for an unrelated one would snap a
+    /// revealed bar shut under the pointer.
+    private var appliedAutoHide: Bool?
 
     private let peekHeight: CGFloat = 2
-    private let animationDuration: TimeInterval = 0.18
+    private let slideDuration: TimeInterval = 0.18
 
     func show() {
         AppLog.info("TaskbarPanel.show", ["screens": NSScreen.screens.count])
-        rebuild()
+        syncPanels()
         guard !observersRegistered else { return }
         observersRegistered = true
         NotificationCenter.default.addObserver(
@@ -34,25 +49,31 @@ final class TaskbarPanelController {
             name: .taskbarSettingsChanged,
             object: nil
         )
+        TaskbarAppearance.addObserver(self, selector: #selector(displayOptionsChanged))
     }
 
     func hide() {
         AppLog.info("TaskbarPanel.hide")
+        closeOverlays(on: Array(entries.keys))
         stopMouseMonitoring()
-        cancelHideTimer()
-        for entry in panels.values {
+        cancelAllHideTimers()
+        for entry in entries.values {
             entry.panel.orderOut(nil)
         }
-        panels.removeAll()
-        contentViews.removeAll()
-        revealedIDs.removeAll()
+        entries.removeAll()
+        revealedKeys.removeAll()
+        appliedAutoHide = nil
+        // Every overlay was just closed, so nothing can still legitimately hold the
+        // bar open. Zeroing also recovers from an owner that went away without
+        // balancing its begin, which would otherwise disable auto-hide for good.
+        keepVisibleCount = 0
     }
 
     /// Keep the bar visible while overlays (Start, Downloads) are open.
     /// Reveals immediately (no slide-in) so Start anchors at the correct position.
     func beginKeepVisible() {
         keepVisibleCount += 1
-        cancelHideTimer()
+        cancelAllHideTimers()
         revealAll(animated: false)
     }
 
@@ -67,66 +88,126 @@ final class TaskbarPanelController {
     func toggleStartMenu() {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
-        let targetID = screen.map { ObjectIdentifier($0) }
-        let target = targetID.flatMap { contentViews[$0] } ?? contentViews.values.first
+        let targetKey = screen.flatMap(Self.key(for:))
+        let target = targetKey.flatMap { entries[$0]?.content } ?? entries.values.first?.content
 
-        for (id, content) in contentViews {
-            if id != targetID, content.isStartMenuVisible {
-                content.hideStartMenu()
-            }
+        for (key, entry) in entries where key != targetKey && entry.content.isStartMenuVisible {
+            entry.content.hideStartMenu()
         }
 
         let opening = target.map { !$0.isStartMenuVisible } ?? true
         if opening {
-            cancelHideTimer()
+            cancelAllHideTimers()
             revealAll(animated: false)
         }
         target?.toggleStartMenuFromHotkey()
     }
 
     @objc private func screensChanged() {
-        rebuild()
+        syncPanels()
     }
 
     @objc private func settingsChanged() {
-        rebuild()
+        // Bar height is fixed and the content views reload themselves for layout
+        // settings, so auto-hide is the only setting the panels act on.
+        updateAutoHideMode()
     }
 
-    private func rebuild() {
-        hide()
-        for screen in NSScreen.screens {
-            let panel = makePanel(for: screen)
-            let id = ObjectIdentifier(screen)
-            panels[id] = (panel, screen)
-            revealedIDs.insert(id)
-            panel.orderFrontRegardless()
+    @objc private func displayOptionsChanged() {
+        // Reduce Motion switches between sliding and fading; re-park every panel in
+        // its current state so a hidden bar moves to the right resting place.
+        for key in entries.keys {
+            setRevealed(revealedKeys.contains(key), for: key, animated: false)
         }
-        applyAutoHideMode()
     }
 
-    private func applyAutoHideMode() {
-        if TaskbarSettings.shared.autoHideTaskbar {
+    private static func key(for screen: NSScreen) -> ScreenKey? {
+        screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    }
+
+    /// Matches panels to the current screens. Existing panels are repositioned in
+    /// place, so the frequent no-op notifications (Dock, menu bar, wake) keep open
+    /// flyouts and in-progress drags; panels are only created or destroyed for
+    /// screens that came or went.
+    private func syncPanels() {
+        var current: [ScreenKey: NSScreen] = [:]
+        for screen in NSScreen.screens {
+            if let key = Self.key(for: screen) {
+                current[key] = screen
+            }
+        }
+
+        let removed = entries.keys.filter { current[$0] == nil }
+        // Start and the flyouts are positioned once, when they open; a screen that
+        // moved or changed resolution would leave them floating at the old spot.
+        let resized = entries.compactMap { key, entry in
+            current[key].flatMap { $0.frame != entry.screen.frame ? key : nil }
+        }
+        closeOverlays(on: removed + resized)
+        for key in removed {
+            cancelHideTimer(for: key)
+            entries[key]?.panel.orderOut(nil)
+            entries[key] = nil
+            revealedKeys.remove(key)
+        }
+
+        for (key, screen) in current {
+            if var entry = entries[key] {
+                entry.screen = screen
+                entries[key] = entry
+            } else {
+                entries[key] = makeEntry(for: screen)
+                if appliedAutoHide != true || keepVisibleCount > 0 {
+                    revealedKeys.insert(key)
+                }
+            }
+            // Recomputes the frame against the screen's new geometry.
+            setRevealed(revealedKeys.contains(key), for: key, animated: false)
+        }
+
+        updateAutoHideMode()
+        handleMouseLocation(NSEvent.mouseLocation)
+    }
+
+    /// Closes Start on the given screens plus the shared tray flyouts, so each
+    /// overlay balances its `beginKeepVisible` before the view it is anchored to goes
+    /// away or moves. The flyouts don't expose which screen they opened on, and
+    /// screens being removed or resized is rare, so they are all closed.
+    private func closeOverlays(on keys: [ScreenKey]) {
+        guard !keys.isEmpty else { return }
+        for key in keys {
+            entries[key]?.content.hideStartMenu()
+        }
+        DownloadsPanelController.shared.hide()
+        TrashPanelController.shared.hide()
+        CalendarPanelController.shared.hide()
+    }
+
+    private func updateAutoHideMode() {
+        let autoHide = TaskbarSettings.shared.autoHideTaskbar
+        guard autoHide != appliedAutoHide else { return }
+        appliedAutoHide = autoHide
+        if autoHide {
             startMouseMonitoring()
-            for id in panels.keys {
-                setRevealed(false, for: id, animated: false)
+            if keepVisibleCount == 0 {
+                for key in entries.keys {
+                    setRevealed(false, for: key, animated: false)
+                }
             }
             handleMouseLocation(NSEvent.mouseLocation)
         } else {
             stopMouseMonitoring()
-            cancelHideTimer()
-            for id in panels.keys {
-                setRevealed(true, for: id, animated: false)
-            }
+            cancelAllHideTimers()
+            revealAll(animated: false)
         }
     }
 
-    private func makePanel(for screen: NSScreen) -> NSPanel {
+    private func makeEntry(for screen: NSScreen) -> Entry {
         let height = TaskbarSettings.shared.barHeight
-        let visible = screen.frame
         let frame = NSRect(
-            x: visible.origin.x,
-            y: visible.origin.y,
-            width: visible.width,
+            x: screen.frame.origin.x,
+            y: screen.frame.origin.y,
+            width: screen.frame.width,
             height: height
         )
 
@@ -140,41 +221,38 @@ final class TaskbarPanelController {
         panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        // No .fullScreenAuxiliary: an all-Spaces window without it is left out of
+        // native full-screen Spaces, so full-screen apps get the whole display the
+        // way Windows hides its taskbar for them. .stationary keeps the bar in place
+        // through Mission Control on ordinary Spaces.
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
         panel.level = .statusBar
+        // The Windows 10 taskbar is dark regardless of the system theme; pinning the
+        // appearance makes every dynamic colour on the bar resolve to its dark variant.
+        panel.appearance = NSAppearance(named: .darkAqua)
 
-        let effect = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
-        effect.autoresizingMask = [.width, .height]
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
+        let background = TaskbarBackgroundView(frame: NSRect(origin: .zero, size: frame.size))
+        background.autoresizingMask = [.width, .height]
 
-        let tint = NSView(frame: effect.bounds)
-        tint.autoresizingMask = [.width, .height]
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
-        effect.addSubview(tint)
-
-        let content = TaskbarContentView(frame: effect.bounds)
+        let content = TaskbarContentView(frame: background.bounds)
         content.autoresizingMask = [.width, .height]
-        effect.addSubview(content)
-        contentViews[ObjectIdentifier(screen)] = content
+        background.addSubview(content)
 
         let line = NSView(frame: NSRect(x: 0, y: height - 1, width: frame.width, height: 1))
         line.autoresizingMask = [.width, .minYMargin]
         line.wantsLayer = true
         line.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        effect.addSubview(line)
+        background.addSubview(line)
 
-        panel.contentView = effect
+        panel.contentView = background
         panel.setFrame(frame, display: true)
         panel.orderFrontRegardless()
-        return panel
+        return Entry(panel: panel, content: content, screen: screen)
     }
 
     // MARK: - Auto-hide
@@ -205,111 +283,150 @@ final class TaskbarPanelController {
         guard TaskbarSettings.shared.autoHideTaskbar else { return }
 
         if keepVisibleCount > 0 {
-            cancelHideTimer()
+            cancelAllHideTimers()
             revealAll(animated: true)
             return
         }
 
-        var hoveringAny = false
-        for (id, entry) in panels {
-            let height = TaskbarSettings.shared.barHeight
-            let revealed = revealedIDs.contains(id)
-            let zoneHeight = revealed
-                ? height + 4
-                : CGFloat(TaskbarSettings.shared.autoHideRevealZone)
-            let hotZone = NSRect(
-                x: entry.screen.frame.minX,
-                y: entry.screen.frame.minY,
-                width: entry.screen.frame.width,
-                height: zoneHeight
-            )
-            if hotZone.contains(point) {
-                hoveringAny = true
-                cancelHideTimer()
-                setRevealed(true, for: id, animated: true)
+        // Each screen hides on its own timer, so moving from one screen's bar to
+        // another's lets the first slide away instead of waiting for the pointer to
+        // leave every bar.
+        for key in entries.keys {
+            if isPointer(point, overBarOf: key) {
+                cancelHideTimer(for: key)
+                setRevealed(true, for: key, animated: true)
+            } else if revealedKeys.contains(key) {
+                scheduleHide(for: key)
             }
-        }
-
-        if !hoveringAny {
-            scheduleHideAll()
         }
     }
 
-    private func scheduleHideAll() {
-        guard hideTimer == nil else { return }
+    /// A revealed bar stays up while the pointer is anywhere over it; a hidden one
+    /// only reacts to the configurable strip along the screen edge.
+    private func isPointer(_ point: NSPoint, overBarOf key: ScreenKey) -> Bool {
+        guard let frame = entries[key]?.screen.frame else { return false }
+        let zoneHeight = revealedKeys.contains(key)
+            ? TaskbarSettings.shared.barHeight + 4
+            : CGFloat(TaskbarSettings.shared.autoHideRevealZone)
+        return NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: zoneHeight).contains(point)
+    }
+
+    private func scheduleHide(for key: ScreenKey) {
+        guard hideTimers[key] == nil else { return }
         let delay = TaskbarSettings.shared.autoHideDelay
-        let fire: () -> Void = { [weak self] in
-            guard let self else { return }
-            self.hideTimer = nil
-            guard self.keepVisibleCount == 0 else { return }
-            let point = NSEvent.mouseLocation
-            for (id, entry) in self.panels {
-                let height = TaskbarSettings.shared.barHeight
-                let hotZone = NSRect(
-                    x: entry.screen.frame.minX,
-                    y: entry.screen.frame.minY,
-                    width: entry.screen.frame.width,
-                    height: height + 4
-                )
-                if !hotZone.contains(point) {
-                    self.setRevealed(false, for: id, animated: true)
-                }
-            }
-        }
         if delay <= 0 {
-            fire()
+            hideIfIdle(key)
             return
         }
-        hideTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
-            fire()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hideIfIdle(key) }
         }
-        if let hideTimer {
-            RunLoop.main.add(hideTimer, forMode: .common)
-        }
+        RunLoop.main.add(timer, forMode: .common)
+        hideTimers[key] = timer
     }
 
-    private func cancelHideTimer() {
-        hideTimer?.invalidate()
-        hideTimer = nil
+    private func hideIfIdle(_ key: ScreenKey) {
+        hideTimers[key] = nil
+        guard keepVisibleCount == 0,
+              !isPointer(NSEvent.mouseLocation, overBarOf: key) else { return }
+        setRevealed(false, for: key, animated: true)
+    }
+
+    private func cancelHideTimer(for key: ScreenKey) {
+        hideTimers.removeValue(forKey: key)?.invalidate()
+    }
+
+    private func cancelAllHideTimers() {
+        hideTimers.values.forEach { $0.invalidate() }
+        hideTimers.removeAll()
     }
 
     private func revealAll(animated: Bool) {
-        for id in panels.keys {
-            setRevealed(true, for: id, animated: animated)
+        for key in entries.keys {
+            setRevealed(true, for: key, animated: animated)
         }
     }
 
-    private func setRevealed(_ revealed: Bool, for id: ObjectIdentifier, animated: Bool) {
-        guard let entry = panels[id] else { return }
-        let currentlyRevealed = revealedIDs.contains(id)
-        if revealed == currentlyRevealed {
-            if animated { return }
-        }
+    private func setRevealed(_ revealed: Bool, for key: ScreenKey, animated: Bool) {
+        guard let entry = entries[key] else { return }
+        if revealed == revealedKeys.contains(key), animated { return }
         if revealed {
-            revealedIDs.insert(id)
+            revealedKeys.insert(key)
         } else {
-            revealedIDs.remove(id)
+            revealedKeys.remove(key)
         }
 
         let height = TaskbarSettings.shared.barHeight
-        let screen = entry.screen
-        let targetY = revealed
-            ? screen.frame.minY
-            : screen.frame.minY - (height - peekHeight)
-        var frame = entry.panel.frame
-        frame.origin.x = screen.frame.minX
-        frame.origin.y = targetY
-        frame.size.width = screen.frame.width
-        frame.size.height = height
+        let screenFrame = entry.screen.frame
+        let fades = TaskbarAppearance.reduceMotion || hasScreen(below: screenFrame, barHeight: height)
+        let hiddenY = fades ? screenFrame.minY : screenFrame.minY - (height - peekHeight)
+        let frame = NSRect(
+            x: screenFrame.minX,
+            y: revealed ? screenFrame.minY : hiddenY,
+            width: screenFrame.width,
+            height: height
+        )
+        let alpha: CGFloat = revealed || !fades ? 1 : 0
+        // A faded-out bar still sits over the bottom of the screen; let clicks
+        // through to the windows beneath it. Reveal stays driven by the mouse
+        // monitors, which don't depend on the panel receiving events.
+        entry.panel.ignoresMouseEvents = alpha == 0
 
         if animated {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = animationDuration
+                context.duration = fades ? TaskbarAppearance.reducedMotionFade : slideDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 entry.panel.animator().setFrame(frame, display: true)
+                entry.panel.animator().alphaValue = alpha
             }
         } else {
             entry.panel.setFrame(frame, display: true)
+            entry.panel.alphaValue = alpha
         }
+    }
+
+    /// Parking the bar below its screen only hides it when nothing is there. With
+    /// a display stacked underneath, the parked bar would draw across the top of
+    /// that display instead, so those screens fade the bar out in place.
+    private func hasScreen(below frame: NSRect, barHeight: CGFloat) -> Bool {
+        let parked = NSRect(x: frame.minX, y: frame.minY - barHeight, width: frame.width, height: barHeight)
+        return NSScreen.screens.contains { $0.frame != frame && $0.frame.intersects(parked) }
+    }
+}
+
+/// Frosted bar background, swapped for Windows' solid grey under Reduce Transparency.
+private final class TaskbarBackgroundView: NSView {
+    private let effect = NSVisualEffectView()
+    private let tint = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        effect.frame = bounds
+        effect.autoresizingMask = [.width, .height]
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        addSubview(effect)
+
+        tint.frame = bounds
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        addSubview(tint)
+
+        refresh()
+        TaskbarAppearance.addObserver(self, selector: #selector(refresh))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func refresh() {
+        // The system already flattens vibrancy under Reduce Transparency, but to its
+        // own window grey; hide it outright so the bar is the same solid colour as
+        // Windows' and doesn't pick up the desktop behind it.
+        let opaque = TaskbarAppearance.reduceTransparency
+        effect.isHidden = opaque
+        tint.layer?.backgroundColor = opaque
+            ? TaskbarAppearance.opaqueBackground.cgColor
+            : NSColor.black.withAlphaComponent(0.35).cgColor
     }
 }

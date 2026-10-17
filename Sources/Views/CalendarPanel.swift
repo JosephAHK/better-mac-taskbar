@@ -1,10 +1,18 @@
 import AppKit
 
+/// Borderless panels refuse key status by default, and the flyout has to be key
+/// for Escape to reach its key monitor.
+private final class CalendarKeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 /// Clock flyout — a Windows-style month calendar anchored above the clock.
 ///
 /// Mirrors DownloadsPanelController's presentation (borderless floating panel,
 /// click-outside/Escape to dismiss, taskbar held visible while open) so all three
 /// tray flyouts behave identically.
+@MainActor
 final class CalendarPanelController {
     static let shared = CalendarPanelController()
 
@@ -12,6 +20,10 @@ final class CalendarPanelController {
     private weak var anchor: NSView?
     private var localMonitor: Any?
     private var globalMonitor: Any?
+    /// Cmd-Tab, Mission Control or another app stealing focus closes the flyout.
+    private lazy var focus = FlyoutFocus { [weak self] in
+        self?.hide(restoringFocus: false)
+    }
 
     var isVisible: Bool { panel?.isVisible == true }
 
@@ -26,6 +38,12 @@ final class CalendarPanelController {
     }
 
     func hide() {
+        hide(restoringFocus: true)
+    }
+
+    /// `restoringFocus` is false when the user dismissed the flyout by moving to
+    /// another app, which then already has focus and must keep it.
+    private func hide(restoringFocus: Bool) {
         let wasVisible = panel != nil
         removeMonitors()
         (panel?.contentView as? CalendarPanelView)?.stopClock()
@@ -35,6 +53,7 @@ final class CalendarPanelController {
         (anchor as? ClockButtonView)?.isOpen = false
         anchor = nil
         if wasVisible {
+            focus.end(restoringFocus: restoringFocus)
             TaskbarPanelController.shared.endKeepVisible()
         }
     }
@@ -42,7 +61,7 @@ final class CalendarPanelController {
     private func show(relativeTo view: NSView) {
         DownloadsPanelController.shared.hide()
         TrashPanelController.shared.hide()
-        hide()
+        hide(restoringFocus: false)
         guard let window = view.window else { return }
 
         let content = CalendarPanelView()
@@ -53,7 +72,7 @@ final class CalendarPanelController {
         let width = size.width
         let height = size.height
 
-        let panel = NSPanel(
+        let panel = CalendarKeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
@@ -67,7 +86,11 @@ final class CalendarPanelController {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
         panel.worksWhenModal = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Same Spaces behaviour as the bar it hangs off, which stays out of
+        // full-screen Spaces.
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // Dark like the taskbar regardless of the system theme.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = content
 
         // Flush to the right edge of the screen with a small gutter, not to the clock
@@ -79,7 +102,8 @@ final class CalendarPanelController {
         let y = screenFrame.maxY + PanelMetrics.flyoutEdgeGutter
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
 
-        panel.orderFront(nil)
+        focus.begin()
+        panel.makeKeyAndOrderFront(nil)
         AppLog.debug("calendar flyout shown", [
             "width": width,
             "height": height,
@@ -110,8 +134,9 @@ final class CalendarPanelController {
             self.handleMouseDown(event)
             return event
         }
+        // A click in another app activates it; leave focus where the user put it.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.hide()
+            self?.hide(restoringFocus: false)
         }
     }
 
@@ -149,8 +174,12 @@ final class CalendarPanelView: NSView {
     private let monthLabel = NSTextField(labelWithString: "")
     private let grid = NSGridView()
     private var clockTimer: Timer?
+    private let effect = NSVisualEffectView()
+    private let tint = NSView()
 
-    private let calendar = Calendar.current
+    /// Autoupdating so a first-weekday or region change in System Settings applies
+    /// without reopening the flyout.
+    private let calendar = Calendar.autoupdatingCurrent
     /// First day of the month currently on screen; the arrows move this.
     private var displayedMonth: Date
 
@@ -165,6 +194,7 @@ final class CalendarPanelView: NSView {
     private static var columnWidth: CGFloat { (panelWidth - inset * 2) / CGFloat(columnCount) }
 
     private var dayCells: [CalendarDayCell] = []
+    private var weekdayLabels: [NSTextField] = []
 
     init() {
         displayedMonth = Calendar.current.date(
@@ -180,16 +210,15 @@ final class CalendarPanelView: NSView {
         layer?.cornerRadius = 8
         layer?.masksToBounds = true
 
-        let effect = NSVisualEffectView()
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
         addSubview(effect, positioned: .below, relativeTo: nil)
 
-        let tint = NSView()
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
         addSubview(tint, positioned: .above, relativeTo: effect)
+        refreshBackground()
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshBackground))
 
         for background in [effect, tint] {
             background.translatesAutoresizingMaskIntoConstraints = false
@@ -205,6 +234,9 @@ final class CalendarPanelView: NSView {
         buildGrid()
         reloadGrid()
         tick()
+        // Covers midnight (the "today" circle would otherwise sit on yesterday while
+        // the flyout stays open) as well as locale, time zone and wake changes.
+        NotificationCenter.default.addObserver(self, selector: #selector(clockChanged), name: TaskbarClock.didChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -213,15 +245,32 @@ final class CalendarPanelView: NSView {
         clockTimer?.invalidate()
     }
 
+    @objc private func refreshBackground() {
+        // Same treatment as the taskbar: Windows' solid grey instead of vibrancy.
+        let opaque = TaskbarAppearance.reduceTransparency
+        effect.isHidden = opaque
+        tint.layer?.backgroundColor = opaque
+            ? TaskbarAppearance.opaqueBackground.cgColor
+            : NSColor.black.withAlphaComponent(0.28).cgColor
+    }
+
+    @objc private func clockChanged() {
+        reloadGrid()
+        tick()
+    }
+
     // MARK: - Live clock
 
     /// Driven only while the panel is on screen — a tray flyout that keeps a 1s
     /// timer alive after dismissal would tick forever behind the user's back.
+    /// Aligned to whole seconds so the readout turns over with the system clock
+    /// rather than up to a second late.
     func startClock() {
         stopClock()
         tick()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.tick()
+        let next = Date(timeIntervalSinceReferenceDate: Date().timeIntervalSinceReferenceDate.rounded(.down) + 1)
+        let timer = Timer(fire: next, interval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
         clockTimer = timer
@@ -234,12 +283,8 @@ final class CalendarPanelView: NSView {
 
     private func tick() {
         let now = Date()
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "h:mm:ss a"
-        let dateFmt = DateFormatter()
-        dateFmt.dateFormat = "EEEE, MMMM d, yyyy"
-        timeLabel.stringValue = timeFmt.string(from: now)
-        dateLabel.stringValue = dateFmt.string(from: now)
+        timeLabel.stringValue = TaskbarClock.shared.longTime.string(from: now)
+        dateLabel.stringValue = TaskbarClock.shared.fullDate.string(from: now)
     }
 
     // MARK: - Layout
@@ -332,19 +377,15 @@ final class CalendarPanelView: NSView {
         grid.yPlacement = .fill
         addSubview(grid)
 
-        // Weekday header, rotated to the locale's first weekday so the columns line
-        // up with the day cells below.
-        let symbols = calendar.veryShortWeekdaySymbols
-        let offset = calendar.firstWeekday - 1
-        let ordered = (0..<Self.columnCount).map { symbols[($0 + offset) % symbols.count] }
-        let headerViews: [NSView] = ordered.map { symbol in
-            let label = NSTextField(labelWithString: symbol)
+        // Weekday header; reloadGrid fills in the letters.
+        weekdayLabels = (0..<Self.columnCount).map { _ in
+            let label = NSTextField(labelWithString: "")
             label.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
             label.textColor = .secondaryLabelColor
             label.alignment = .center
             return label
         }
-        grid.addRow(with: headerViews)
+        grid.addRow(with: weekdayLabels)
 
         for _ in 0..<Self.rowCount {
             let cells = (0..<Self.columnCount).map { _ -> CalendarDayCell in
@@ -371,9 +412,15 @@ final class CalendarPanelView: NSView {
     }
 
     private func reloadGrid() {
-        let monthFmt = DateFormatter()
-        monthFmt.dateFormat = "MMMM yyyy"
-        monthLabel.stringValue = monthFmt.string(from: displayedMonth)
+        monthLabel.stringValue = TaskbarClock.shared.monthYear.string(from: displayedMonth)
+
+        // Rotated to the locale's first weekday so the columns line up with the day
+        // cells below.
+        let symbols = calendar.veryShortWeekdaySymbols
+        let offset = calendar.firstWeekday - 1
+        for (column, label) in weekdayLabels.enumerated() {
+            label.stringValue = symbols[(column + offset) % symbols.count]
+        }
 
         guard let firstOfMonth = calendar.date(
             from: calendar.dateComponents([.year, .month], from: displayedMonth)
@@ -390,13 +437,12 @@ final class CalendarPanelView: NSView {
                 value: index - leadingBlanks,
                 to: firstOfMonth
             ) else {
-                cell.configure(day: "", isToday: false, isCurrentMonth: false)
+                cell.configure(date: nil, isToday: false, isCurrentMonth: false)
                 continue
             }
-            let day = calendar.component(.day, from: cellDate)
             let inMonth = calendar.isDate(cellDate, equalTo: firstOfMonth, toGranularity: .month)
             cell.configure(
-                day: "\(day)",
+                date: cellDate,
                 isToday: calendar.isDate(cellDate, inSameDayAs: today),
                 isCurrentMonth: inMonth
             )
@@ -429,6 +475,9 @@ private final class CalendarDayCell: NSView {
     private let marker = NSView()
     private static let markerDiameter: CGFloat = 28
 
+    private var date: Date?
+    private var isToday = false
+
     init() {
         super.init(frame: .zero)
         marker.wantsLayer = true
@@ -439,6 +488,7 @@ private final class CalendarDayCell: NSView {
         label.font = NSFont.systemFont(ofSize: 12)
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
+        label.setAccessibilityElement(false)
         addSubview(label)
 
         NSLayoutConstraint.activate([
@@ -450,20 +500,45 @@ private final class CalendarDayCell: NSView {
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshMarker))
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(day: String, isToday: Bool, isCurrentMonth: Bool) {
-        label.stringValue = day
+    func configure(date: Date?, isToday: Bool, isCurrentMonth: Bool) {
+        self.date = date
+        self.isToday = isToday
+        label.stringValue = date.map { "\(Calendar.autoupdatingCurrent.component(.day, from: $0))" } ?? ""
         if isToday {
-            marker.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+            // White on the accent fill, like Windows' today highlight.
             label.textColor = .white
             label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         } else {
-            marker.layer?.backgroundColor = NSColor.clear.cgColor
             label.textColor = isCurrentMonth ? .labelColor : .tertiaryLabelColor
             label.font = NSFont.systemFont(ofSize: 12)
         }
+        refreshMarker()
     }
+
+    @objc private func refreshMarker() {
+        marker.layer?.backgroundColor = isToday
+            ? resolvedCGColor(.controlAccentColor)
+            : NSColor.clear.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshMarker()
+    }
+
+    // MARK: - Accessibility
+
+    // Static text rather than a button: days have no action, and VoiceOver would
+    // otherwise announce a control that does nothing when pressed.
+    override func isAccessibilityElement() -> Bool { date != nil }
+    override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+    override func accessibilityLabel() -> String? {
+        date.map { TaskbarClock.shared.fullDate.string(from: $0) }
+    }
+    override func accessibilityValue() -> Any? { isToday ? "Today" : nil }
 }

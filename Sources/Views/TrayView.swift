@@ -7,25 +7,13 @@ final class TrayView: NSView {
     private let trashButton = TrashButtonView()
     private let clockButton = ClockButtonView()
     private let showDesktop = ShowDesktopButtonView()
-    private var clockTimer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setup()
-        tick()
-        clockTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        if let clockTimer {
-            RunLoop.main.add(clockTimer, forMode: .common)
-        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    deinit {
-        clockTimer?.invalidate()
-    }
 
     private func setup() {
         let stack = NSStackView()
@@ -103,9 +91,112 @@ final class TrayView: NSView {
         ])
         return wrap
     }
+}
 
-    private func tick() {
-        clockButton.update(with: Date())
+/// One clock source shared by every screen's tray clock and the calendar flyout.
+///
+/// Formats come from locale templates rather than fixed patterns, so the 12/24-hour
+/// preference, field order and language follow System Settings. Formatters are
+/// costly to build, so they are made once and rebuilt only when the locale or time
+/// zone actually changes.
+@MainActor
+final class TaskbarClock {
+    static let shared = TaskbarClock()
+
+    /// Posted on every minute boundary, and whenever the shown time may have jumped
+    /// or reformatted: wake, a manual clock change, time zone, locale, or midnight.
+    static let didChange = Notification.Name("TaskbarClockDidChange")
+
+    /// Tray clock: hours and minutes.
+    private(set) var shortTime = DateFormatter()
+    /// Tray clock's second line.
+    private(set) var shortDate = DateFormatter()
+    /// Calendar flyout's live readout.
+    private(set) var longTime = DateFormatter()
+    private(set) var fullDate = DateFormatter()
+    private(set) var monthYear = DateFormatter()
+    /// Spoken by VoiceOver for the tray clock.
+    private(set) var dateAndTime = DateFormatter()
+
+    private var minuteTimer: Timer?
+
+    private init() {
+        rebuildFormatters()
+        scheduleNextMinute()
+
+        // Block observers on the main queue: the clock and calendar-day
+        // notifications are not guaranteed to arrive on the main thread.
+        let names: [Notification.Name] = [
+            .NSSystemTimeZoneDidChange,
+            .NSSystemClockDidChange,
+            .NSCalendarDayChanged,
+            NSLocale.currentLocaleDidChangeNotification
+        ]
+        for name in names {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.timeChanged() }
+            }
+        }
+        // Timers don't fire on schedule across sleep, so the minute is stale on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.timeChanged() }
+        }
+    }
+
+    private func timeChanged() {
+        rebuildFormatters()
+        scheduleNextMinute()
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
+    }
+
+    private func rebuildFormatters() {
+        shortTime = Self.formatter(template: "jmm")
+        longTime = Self.formatter(template: "jmmss")
+        monthYear = Self.formatter(template: "yMMMM")
+        shortDate = Self.formatter(dateStyle: .short, timeStyle: .none)
+        fullDate = Self.formatter(dateStyle: .full, timeStyle: .none)
+        dateAndTime = Self.formatter(dateStyle: .full, timeStyle: .short)
+    }
+
+    private static func formatter(template: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter
+    }
+
+    private static func formatter(dateStyle: DateFormatter.Style, timeStyle: DateFormatter.Style) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateStyle = dateStyle
+        formatter.timeStyle = timeStyle
+        return formatter
+    }
+
+    /// The tray shows no seconds, so it repaints once per minute, re-aimed at the
+    /// next boundary each time rather than drifting on a repeating interval. Every
+    /// time zone is offset by whole minutes, so reference-date minutes line up with
+    /// local ones.
+    private func scheduleNextMinute() {
+        minuteTimer?.invalidate()
+        let minutes = (Date().timeIntervalSinceReferenceDate / 60).rounded(.down)
+        let next = Date(timeIntervalSinceReferenceDate: (minutes + 1) * 60)
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.scheduleNextMinute()
+                NotificationCenter.default.post(name: Self.didChange, object: nil)
+            }
+        }
+        // .common keeps the clock moving while a menu is tracking.
+        RunLoop.main.add(timer, forMode: .common)
+        minuteTimer = timer
     }
 }
 
@@ -123,27 +214,14 @@ final class ClockButtonView: NSView {
     private let timeLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
     private var tracking: NSTrackingArea?
-
-    /// Held as instance state: DateFormatter construction is not cheap and this
-    /// formats twice a second, every second, for the life of the process.
-    private let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        return formatter
-    }()
-
-    private let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "M/d/yyyy"
-        return formatter
-    }()
+    private var isHovered = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         toolTip = "Click for calendar"
 
-        // Monospaced digits keep the bar from shifting as the seconds tick over.
+        // Monospaced digits keep the bar from shifting as the minutes tick over.
         timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         timeLabel.textColor = .labelColor
         timeLabel.alignment = .right
@@ -163,18 +241,27 @@ final class ClockButtonView: NSView {
             clockStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             clockStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10)
         ])
+
+        for label in [timeLabel, dateLabel] {
+            label.setAccessibilityElement(false)
+        }
+        update()
+        NotificationCenter.default.addObserver(self, selector: #selector(update), name: TaskbarClock.didChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(with date: Date) {
-        timeLabel.stringValue = timeFormatter.string(from: date)
-        dateLabel.stringValue = dateFormatter.string(from: date)
+    @objc private func update() {
+        let now = Date()
+        timeLabel.stringValue = TaskbarClock.shared.shortTime.string(from: now)
+        dateLabel.stringValue = TaskbarClock.shared.shortDate.string(from: now)
     }
 
     private func refreshAppearance() {
         if isOpen {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        } else if isHovered {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
         }
@@ -193,12 +280,12 @@ final class ClockButtonView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if !isOpen {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        }
+        isHovered = true
+        refreshAppearance()
     }
 
     override func mouseExited(with event: NSEvent) {
+        isHovered = false
         refreshAppearance()
     }
 
@@ -208,16 +295,37 @@ final class ClockButtonView: NSView {
 
     /// Right-click still reaches Date & Time settings, which the left click used to do.
     override func rightMouseDown(with event: NSEvent) {
+        popUpTaskbarIconMenu(makeContextMenu(), with: event, in: self)
+    }
+
+    private func makeContextMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "Date & Time Settings…", action: #selector(openDateTime), keyEquivalent: "")
         menu.items.forEach { $0.target = self }
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        return menu
     }
 
     @objc private func openDateTime() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.Date-Time-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { TaskbarClock.shared.dateAndTime.string(from: Date()) }
+    override func accessibilityHelp() -> String? { "Shows the calendar" }
+
+    override func accessibilityPerformPress() -> Bool {
+        onToggle?()
+        return true
+    }
+
+    override func accessibilityPerformShowMenu() -> Bool {
+        popUpTaskbarIconMenu(makeContextMenu(), with: nil, in: self)
+        return true
     }
 }
 
@@ -257,5 +365,14 @@ private final class ShowDesktopButtonView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onClick?()
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { "Show desktop" }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 }

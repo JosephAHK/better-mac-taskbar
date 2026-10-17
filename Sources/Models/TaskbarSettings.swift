@@ -57,6 +57,24 @@ struct StartMenuHotkey: Equatable {
         }
     }
 
+    /// F1–F20. They type no text, so they are the only keys allowed without a modifier.
+    static let functionKeyCodes: Set<UInt16> = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109,
+        103, 111, 105, 107, 113, 106, 64, 79, 80, 90
+    ]
+
+    /// Whether a recorded key combination may become the global Start shortcut.
+    ///
+    /// The shortcut is swallowed in every app, so a bare text key (or one with
+    /// only ⇧) would stop that character from ever being typed. Text keys need
+    /// ⌘, ⌥ or ⌃. Arrows, Return, Space and friends count as text keys here —
+    /// they edit text too. Modifier-only shortcuts are recorded separately and
+    /// never pass through this check.
+    static func isAcceptableChord(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        if functionKeyCodes.contains(keyCode) { return true }
+        return !modifierFlags.isDisjoint(with: [.command, .option, .control])
+    }
+
     /// Left/right variants of the same modifier count as a match.
     static func isSameModifierKey(_ a: UInt16, _ b: UInt16) -> Bool {
         guard let fa = modifierFlag(forKeyCode: a), let fb = modifierFlag(forKeyCode: b) else {
@@ -79,7 +97,9 @@ struct StartMenuHotkey: Equatable {
             126: "↑",
             122: "F1", 120: "F2", 99: "F3", 118: "F4",
             96: "F5", 97: "F6", 98: "F7", 100: "F8",
-            101: "F9", 109: "F10", 103: "F11", 111: "F12"
+            101: "F9", 109: "F10", 103: "F11", 111: "F12",
+            105: "F13", 107: "F14", 113: "F15", 106: "F16",
+            64: "F17", 79: "F18", 80: "F19", 90: "F20"
         ]
         if let name = special[keyCode] { return name }
         if let symbol = modifierSymbol(forKeyCode: keyCode) { return symbol }
@@ -121,7 +141,9 @@ enum TaskbarButtonStyle: String, CaseIterable {
     static let minLabeledWidth: CGFloat = 112
 }
 
-final class TaskbarSettings {
+/// Stateless apart from `UserDefaults`, which is thread-safe, so sharing it across
+/// threads is sound.
+final class TaskbarSettings: @unchecked Sendable {
     static let shared = TaskbarSettings()
 
     /// Fixed taskbar height (slightly smaller than the old 52px default).
@@ -140,11 +162,18 @@ final class TaskbarSettings {
         static let taskbarOrder = "taskbarOrder"
         static let didPromptDock = "didPromptDock"
         static let didDismissAccessibilityPrompt = "didDismissAccessibilityPrompt"
-        static let didConfigureLaunchAtLogin = "didConfigureLaunchAtLogin"
         static let startHotkeyEnabled = "startHotkeyEnabled"
         static let startHotkeyKeyCode = "startHotkeyKeyCode"
         static let startHotkeyModifiers = "startHotkeyModifiers"
         static let startHotkeyModifierOnly = "startHotkeyModifierOnly"
+
+        /// Everything the user chose. Excludes the one-shot prompt flags, which
+        /// record what the app already asked rather than a preference.
+        static let userSettings = [
+            centerIcons, buttonStyle, replaceDock, autoHideTaskbar, autoHideRevealZone,
+            autoHideDelay, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
+            startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly
+        ]
     }
 
     var centerIcons: Bool {
@@ -263,12 +292,6 @@ final class TaskbarSettings {
         set { defaults.set(newValue, forKey: Key.didDismissAccessibilityPrompt) }
     }
 
-    /// One-shot: enable Launch at Login the first time this build runs.
-    var didConfigureLaunchAtLogin: Bool {
-        get { defaults.bool(forKey: Key.didConfigureLaunchAtLogin) }
-        set { defaults.set(newValue, forKey: Key.didConfigureLaunchAtLogin) }
-    }
-
     /// Off turns the Start menu shortcut off entirely (taskbar Start button still works).
     var startHotkeyEnabled: Bool {
         get { defaults.object(forKey: Key.startHotkeyEnabled) as? Bool ?? true }
@@ -331,6 +354,182 @@ final class TaskbarSettings {
         guard let idx = ids.firstIndex(of: bundleID) else { return }
         ids.remove(at: idx)
         hiddenBundleIDs = ids
+    }
+}
+
+// MARK: - Reset / import / export
+
+extension TaskbarSettings {
+    private enum FileKey {
+        static let format = "format"
+        static let version = "version"
+        static let startMenuHotkey = "startMenuHotkey"
+        static let keyCode = "keyCode"
+        static let modifierFlags = "modifierFlags"
+        static let modifierOnly = "modifierOnly"
+    }
+
+    private static let fileFormat = "com.bettermac.taskbar.settings"
+    private static let fileVersion = 1
+
+    enum ImportError: LocalizedError {
+        case notASettingsFile
+        case unsupportedVersion(Int)
+        case unknownKeys([String])
+        case invalidValue(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notASettingsFile:
+                return "This file isn't a Better Mac Taskbar settings export."
+            case .unsupportedVersion(let version):
+                return "This settings file is version \(version), which this version of Better Mac Taskbar can't read."
+            case .unknownKeys(let keys):
+                return "This settings file contains unrecognized settings: \(keys.joined(separator: ", "))."
+            case .invalidValue(let key):
+                return "The value for \"\(key)\" in this settings file isn't valid."
+            }
+        }
+    }
+
+    /// Removes every user setting so each getter falls back to its default.
+    func resetToDefaults() {
+        for key in Key.userSettings {
+            defaults.removeObject(forKey: key)
+        }
+        // Removing keys bypasses the setters, so announce every change they would have.
+        for name: Notification.Name in [
+            .taskbarSettingsChanged, .pinnedAppsChanged, .hiddenAppsChanged,
+            .taskbarOrderChanged, .startMenuHotkeyChanged
+        ] {
+            NotificationCenter.default.post(name: name, object: nil)
+        }
+    }
+
+    func exportJSON() throws -> Data {
+        let hotkey = startMenuHotkey
+        let object: [String: Any] = [
+            FileKey.format: Self.fileFormat,
+            FileKey.version: Self.fileVersion,
+            Key.centerIcons: centerIcons,
+            Key.buttonStyle: buttonStyle.rawValue,
+            Key.replaceDock: replaceDock,
+            Key.autoHideTaskbar: autoHideTaskbar,
+            Key.autoHideRevealZone: autoHideRevealZone,
+            Key.autoHideDelay: autoHideDelay,
+            Key.pinnedBundleIDs: pinnedBundleIDs,
+            Key.hiddenBundleIDs: hiddenBundleIDs,
+            Key.taskbarOrder: taskbarOrder,
+            Key.startHotkeyEnabled: startHotkeyEnabled,
+            FileKey.startMenuHotkey: [
+                FileKey.keyCode: Int(hotkey.keyCode),
+                FileKey.modifierFlags: Int(hotkey.modifierFlags),
+                FileKey.modifierOnly: hotkey.modifierOnly
+            ]
+        ]
+        return try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    /// Applies an export. Settings missing from the file are left as they are.
+    /// Every value is validated before any is applied, so a bad file changes
+    /// nothing; accepted values go through the normal setters (and their clamping).
+    func importJSON(_ data: Data) throws {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              object[FileKey.format] as? String == Self.fileFormat else {
+            throw ImportError.notASettingsFile
+        }
+        guard let version = Self.integer(object[FileKey.version]) else {
+            throw ImportError.notASettingsFile
+        }
+        guard version == Self.fileVersion else {
+            throw ImportError.unsupportedVersion(version)
+        }
+        let known: Set<String> = [
+            FileKey.format, FileKey.version, FileKey.startMenuHotkey,
+            Key.centerIcons, Key.buttonStyle, Key.replaceDock, Key.autoHideTaskbar,
+            Key.autoHideRevealZone, Key.autoHideDelay, Key.pinnedBundleIDs,
+            Key.hiddenBundleIDs, Key.taskbarOrder, Key.startHotkeyEnabled
+        ]
+        let unknown = Set(object.keys).subtracting(known).sorted()
+        guard unknown.isEmpty else { throw ImportError.unknownKeys(unknown) }
+
+        var changes: [() -> Void] = []
+
+        func bool(_ key: String, _ assign: @escaping (Bool) -> Void) throws {
+            guard let raw = object[key] else { return }
+            guard let value = Self.boolean(raw) else { throw ImportError.invalidValue(key) }
+            changes.append { assign(value) }
+        }
+        func strings(_ key: String, _ assign: @escaping ([String]) -> Void) throws {
+            guard let raw = object[key] else { return }
+            guard let value = raw as? [String] else { throw ImportError.invalidValue(key) }
+            changes.append { assign(value) }
+        }
+
+        try bool(Key.centerIcons) { self.centerIcons = $0 }
+        try bool(Key.replaceDock) { self.replaceDock = $0 }
+        try bool(Key.autoHideTaskbar) { self.autoHideTaskbar = $0 }
+        try bool(Key.startHotkeyEnabled) { self.startHotkeyEnabled = $0 }
+        try strings(Key.pinnedBundleIDs) { self.pinnedBundleIDs = $0 }
+        try strings(Key.hiddenBundleIDs) { self.hiddenBundleIDs = $0 }
+        try strings(Key.taskbarOrder) { self.taskbarOrder = $0 }
+
+        if let raw = object[Key.buttonStyle] {
+            guard let style = (raw as? String).flatMap(TaskbarButtonStyle.init(rawValue:)) else {
+                throw ImportError.invalidValue(Key.buttonStyle)
+            }
+            changes.append { self.buttonStyle = style }
+        }
+        if let raw = object[Key.autoHideRevealZone] {
+            guard let zone = Self.integer(raw) else { throw ImportError.invalidValue(Key.autoHideRevealZone) }
+            changes.append { self.autoHideRevealZone = zone }
+        }
+        if let raw = object[Key.autoHideDelay] {
+            guard let delay = Self.number(raw) else { throw ImportError.invalidValue(Key.autoHideDelay) }
+            changes.append { self.autoHideDelay = delay }
+        }
+        if let raw = object[FileKey.startMenuHotkey] {
+            guard let hotkey = Self.hotkey(raw) else { throw ImportError.invalidValue(FileKey.startMenuHotkey) }
+            changes.append { self.startMenuHotkey = hotkey }
+        }
+
+        changes.forEach { $0() }
+    }
+
+    /// Rejects anything the recorder itself would not have produced.
+    private static func hotkey(_ raw: Any) -> StartMenuHotkey? {
+        guard let dict = raw as? [String: Any],
+              Set(dict.keys) == [FileKey.keyCode, FileKey.modifierFlags, FileKey.modifierOnly],
+              let keyCode = integer(dict[FileKey.keyCode]).flatMap(UInt16.init(exactly:)),
+              let flags = integer(dict[FileKey.modifierFlags]).flatMap(UInt.init(exactly:)),
+              let modifierOnly = boolean(dict[FileKey.modifierOnly]) else {
+            return nil
+        }
+        let hotkey = StartMenuHotkey(keyCode: keyCode, modifierFlags: flags, modifierOnly: modifierOnly)
+        if modifierOnly {
+            return StartMenuHotkey.modifierFlag(forKeyCode: keyCode) == nil ? nil : hotkey
+        }
+        return StartMenuHotkey.isAcceptableChord(keyCode: keyCode, modifierFlags: hotkey.nsModifierFlags)
+            ? hotkey : nil
+    }
+
+    // JSONSerialization returns NSNumber for both JSON booleans and numbers, and
+    // Swift bridges either way (`true as? Int == 1`), so check the CF type to keep
+    // `"autoHideRevealZone": true` or `"centerIcons": 1` from slipping through.
+
+    private static func boolean(_ raw: Any?) -> Bool? {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
+    private static func number(_ raw: Any?) -> Double? {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.doubleValue
+    }
+
+    private static func integer(_ raw: Any?) -> Int? {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return Int(exactly: number.doubleValue)
     }
 }
 

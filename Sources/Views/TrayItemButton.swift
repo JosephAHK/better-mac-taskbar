@@ -17,6 +17,7 @@ class TrayItemButtonView: NSView {
     let titleLabel = NSTextField(labelWithString: "")
 
     private var tracking: NSTrackingArea?
+    private var isHovered = false
 
     /// Matches TaskButtonView's labelled style so the tray reads as the same bar.
     static let labelFont = NSFont.systemFont(ofSize: 12)
@@ -31,13 +32,15 @@ class TrayItemButtonView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.setAccessibilityElement(false)
         addSubview(iconView)
 
         titleLabel.stringValue = title
         titleLabel.font = Self.labelFont
-        titleLabel.textColor = .white
+        titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.setAccessibilityElement(false)
         addSubview(titleLabel)
 
         NSLayoutConstraint.activate([
@@ -50,6 +53,7 @@ class TrayItemButtonView: NSView {
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalPadding)
         ])
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshAppearance))
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -57,12 +61,19 @@ class TrayItemButtonView: NSView {
     /// Hook for buttons whose icon reflects live state (Trash fullness).
     func refreshIcon() {}
 
-    private func refreshAppearance() {
+    @objc private func refreshAppearance() {
         if isOpen {
-            layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
+            layer?.backgroundColor = resolvedCGColor(.controlAccentColor)
+        } else if isHovered {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
         }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
     }
 
     override func updateTrackingAreas() {
@@ -79,16 +90,28 @@ class TrayItemButtonView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         refreshIcon()
-        if !isOpen {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        }
+        isHovered = true
+        refreshAppearance()
     }
 
     override func mouseExited(with event: NSEvent) {
+        isHovered = false
         refreshAppearance()
     }
 
     override func mouseDown(with event: NSEvent) {
         onToggle?()
+    }
+
+    // MARK: - Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { titleLabel.stringValue }
+    override func accessibilityValue() -> Any? { isOpen ? "Open" : nil }
+
+    override func accessibilityPerformPress() -> Bool {
+        onToggle?()
+        return true
     }
 }

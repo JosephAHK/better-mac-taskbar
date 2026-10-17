@@ -4,6 +4,8 @@ final class StartButtonView: NSView {
     var onToggle: (() -> Void)?
     private var tracking: NSTrackingArea?
     private let logo = StartLogoView()
+    private var isHighlighted = false
+    private var isHovered = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -17,14 +19,31 @@ final class StartButtonView: NSView {
             logo.heightAnchor.constraint(equalToConstant: 24)
         ])
         toolTip = "Start"
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshBackground))
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func setHighlighted(_ on: Bool) {
-        layer?.backgroundColor = on
-            ? NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor
-            : NSColor.clear.cgColor
+        isHighlighted = on
+        refreshBackground()
+    }
+
+    @objc private func refreshBackground() {
+        let color: NSColor
+        if isHighlighted {
+            color = .controlAccentColor
+        } else if isHovered {
+            color = NSColor.white.withAlphaComponent(0.12)
+        } else {
+            color = .clear
+        }
+        layer?.backgroundColor = resolvedCGColor(color)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshBackground()
     }
 
     override func updateTrackingAreas() {
@@ -35,20 +54,29 @@ final class StartButtonView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if layer?.backgroundColor == NSColor.clear.cgColor || layer?.backgroundColor == nil {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        }
+        isHovered = true
+        refreshBackground()
     }
 
     override func mouseExited(with event: NSEvent) {
-        // Keep blue if open — controller manages that
-        if layer?.backgroundColor != NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 1).cgColor {
-            layer?.backgroundColor = NSColor.clear.cgColor
-        }
+        isHovered = false
+        refreshBackground()
     }
 
     override func mouseDown(with event: NSEvent) {
         onToggle?()
+    }
+
+    // MARK: - Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { "Start" }
+    override func accessibilityValue() -> Any? { isHighlighted ? "open" : nil }
+
+    override func accessibilityPerformPress() -> Bool {
+        onToggle?()
+        return true
     }
 }
 
@@ -77,6 +105,7 @@ private final class StartMenuKeyablePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+@MainActor
 final class StartMenuController {
     private var panel: NSPanel?
     private weak var anchor: NSView?
@@ -85,6 +114,9 @@ final class StartMenuController {
     private var globalMonitor: Any?
     /// True while a submenu (e.g. the power menu) owns the mouse.
     private var suppressDismiss = false
+    private lazy var focus = FlyoutFocus { [weak self] in
+        self?.hide(restoringFocus: false)
+    }
 
     /// Fired whenever the menu is dismissed (outside click, launch, settings, toggle, etc.).
     var onHide: (() -> Void)?
@@ -99,8 +131,12 @@ final class StartMenuController {
         }
     }
 
-    func hide() {
+    /// `restoringFocus: false` when whatever caused the hide moves focus itself.
+    func hide(restoringFocus: Bool = true) {
         let wasVisible = panel != nil
+        if wasVisible {
+            focus.end(restoringFocus: restoringFocus)
+        }
         suppressDismiss = false
         removeMonitors()
         panel?.orderOut(nil)
@@ -117,6 +153,7 @@ final class StartMenuController {
     private func show(relativeTo view: NSView) {
         DownloadsPanelController.shared.hide()
         TrashPanelController.shared.hide()
+        CalendarPanelController.shared.hide()
         // Unhide before measuring the Start button so the menu anchors on-screen
         // when the taskbar was auto-hidden (e.g. Start key).
         if !panelWasVisible {
@@ -128,11 +165,17 @@ final class StartMenuController {
         let height: CGFloat = 420
         let content = StartMenuView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         content.onLaunch = { [weak self] bundleID in
+            StartLaunchCounts.record(bundleID)
             PinManager.launch(bundleID: bundleID)
-            self?.hide()
+            self?.hide(restoringFocus: false)
+        }
+        content.onReveal = { [weak self] bundleID in
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            self?.hide(restoringFocus: false)
         }
         content.onSettings = { [weak self] in
-            self?.hide()
+            self?.hide(restoringFocus: false)
             SettingsWindowController.shared.show()
         }
         content.onQuit = {
@@ -140,7 +183,7 @@ final class StartMenuController {
             NSApp.terminate(nil)
         }
         content.onPower = { [weak self] action in
-            self?.hide()
+            self?.hide(restoringFocus: false)
             // Run after the menu's tracking loop unwinds — alerts and AppleScript
             // misbehave inside it.
             DispatchQueue.main.async {
@@ -168,7 +211,10 @@ final class StartMenuController {
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Out of full-screen Spaces like the bar it opens from; dark like the bar
+        // regardless of the system theme (its text is labelColor on a dark tint).
+        panel.collectionBehavior = [.canJoinAllSpaces]
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = content
 
         guard let window = view.window else {
@@ -183,8 +229,7 @@ final class StartMenuController {
         let y = screenFrame.maxY
         panel.setFrameOrigin(NSPoint(x: x, y: y))
 
-        // Accessory (LSUIElement) apps must activate before a panel can take keyboard focus.
-        NSApp.activate(ignoringOtherApps: true)
+        focus.begin()
         panel.makeKeyAndOrderFront(nil)
 
         self.panel = panel
@@ -202,15 +247,16 @@ final class StartMenuController {
             self.handleMouseDown(event)
             return event
         }
+        // A click in another app focuses that app; handing focus back would steal it.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, !self.suppressDismiss else { return }
-            self.hide()
+            self.hide(restoringFocus: false)
         }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         guard isVisible, let content = panel?.contentView as? StartMenuView else { return event }
-        if content.handleSearchKeyDown(event) {
+        if content.handleNavigationKeyDown(event) {
             return nil
         }
         if event.keyCode == 53 { // Escape
@@ -240,46 +286,89 @@ final class StartMenuController {
             let anchorScreen = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
             if anchorScreen.contains(location) { return }
         }
-        hide()
+        // A click elsewhere on the taskbar leaves focus on the taskbar, as on Windows —
+        // and may be a task button activating its own app.
+        hide(restoringFocus: false)
     }
 }
 
-fileprivate struct InstalledApp {
+struct InstalledApp: Equatable {
     let bundleID: String
     let name: String
 }
 
-fileprivate enum AppCatalog {
-    private static var cached: [InstalledApp]?
-    private static var cacheDate: Date?
-    private static let cacheTTL: TimeInterval = 60
+private extension Notification.Name {
+    static let appCatalogChanged = Notification.Name("appCatalogChanged")
+}
 
-    static func allApps() -> [InstalledApp] {
-        if let cached, let cacheDate, Date().timeIntervalSince(cacheDate) < cacheTTL {
-            return cached
+/// Installed apps for Start search.
+///
+/// Main-thread only; scans run on a background queue and publish back here. Reads
+/// never wait on a scan (stale-while-revalidate): `apps` answers from the last scan,
+/// and a rescan runs when an Applications folder changes or, on Start opening, when
+/// the last scan is older than `maxAge`. `appCatalogChanged` fires when it lands.
+@MainActor
+private final class AppCatalog {
+    static let shared = AppCatalog()
+
+    private(set) var apps: [InstalledApp] = []
+    private var lastScan: Date?
+    private var isScanning = false
+    private var rescanRequested = false
+    private var watchers: [DirectoryWatcher] = []
+
+    /// The watchers only see entries added to or removed from the folders themselves;
+    /// this catches what they can't, such as an app replaced inside a subfolder.
+    private static let maxAge: TimeInterval = 60
+
+    private nonisolated static let roots: [URL] = [
+        URL(fileURLWithPath: "/Applications"),
+        URL(fileURLWithPath: "/System/Applications"),
+        URL(fileURLWithPath: "/System/Applications/Utilities"),
+        URL(fileURLWithPath: "/Applications/Utilities"),
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")
+    ]
+
+    private init() {
+        watchers = Self.roots.compactMap { root in
+            DirectoryWatcher(url: root) { [weak self] in self?.rescan() }
         }
-        let apps = scanInstalledApps()
-        cached = apps
-        cacheDate = Date()
-        return apps
     }
 
-    static func invalidateCache() {
-        cached = nil
-        cacheDate = nil
+    func refreshIfStale() {
+        if let lastScan, Date().timeIntervalSince(lastScan) < Self.maxAge { return }
+        rescan()
     }
 
-    private static func scanInstalledApps() -> [InstalledApp] {
+    private func rescan() {
+        guard !isScanning else {
+            rescanRequested = true
+            return
+        }
+        isScanning = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let scanned = Self.scanInstalledApps()
+            DispatchQueue.main.async {
+                self.publish(scanned)
+            }
+        }
+    }
+
+    private func publish(_ scanned: [InstalledApp]) {
+        isScanning = false
+        lastScan = Date()
+        if scanned != apps {
+            apps = scanned
+            NotificationCenter.default.post(name: .appCatalogChanged, object: nil)
+        }
+        if rescanRequested {
+            rescanRequested = false
+            rescan()
+        }
+    }
+
+    private nonisolated static func scanInstalledApps() -> [InstalledApp] {
         let fm = FileManager.default
-        var roots = [
-            URL(fileURLWithPath: "/Applications"),
-            URL(fileURLWithPath: "/System/Applications"),
-            URL(fileURLWithPath: "/System/Applications/Utilities"),
-            URL(fileURLWithPath: "/Applications/Utilities")
-        ]
-        let homeApps = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")
-        roots.append(homeApps)
-
         var seen = Set<String>()
         var results: [InstalledApp] = []
 
@@ -305,6 +394,98 @@ fileprivate enum AppCatalog {
 
         results.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return results
+    }
+}
+
+/// How often each app was launched from Start; breaks ties between equally good
+/// search matches so the app you actually use wins Enter.
+@MainActor
+enum StartLaunchCounts {
+    private static let key = "startMenuLaunchCounts"
+
+    static var all: [String: Int] {
+        UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
+    }
+
+    static func record(_ bundleID: String) {
+        var counts = all
+        counts[bundleID, default: 0] += 1
+        UserDefaults.standard.set(counts, forKey: key)
+    }
+}
+
+/// Start search ranking. Pure — no AppKit, no defaults — so the rules are testable.
+enum StartSearchRanker {
+    /// Higher is better; nil means no match. Tiers, best first: exact name, name
+    /// prefix, prefix of a later word ("code" → Visual Studio Code), initials ("vsc"),
+    /// substring, then the bundle ID's last component. The bundle ID is only tried for
+    /// 3+ characters and never its vendor prefix, so "com" or "apple" don't match
+    /// every app.
+    static func score(name: String, bundleID: String, query: String) -> Int? {
+        let needle = normalize(query)
+        guard !needle.isEmpty else { return nil }
+        let folded = normalize(name)
+        if folded == needle { return 600 }
+        if folded.hasPrefix(needle) { return 500 }
+
+        let words = words(in: name)
+        if words.indices.contains(where: { words[$0...].joined(separator: " ").hasPrefix(needle) }) {
+            return 400
+        }
+        if needle.count >= 2, String(words.compactMap(\.first)).hasPrefix(needle) {
+            return 300
+        }
+        if folded.contains(needle) { return 200 }
+        if needle.count >= 3,
+           let tail = bundleID.split(separator: ".").last,
+           normalize(String(tail)).contains(needle) {
+            return 100
+        }
+        return nil
+    }
+
+    /// Matches only, best score first; ties go to the more-launched app, then by name.
+    static func rank(_ apps: [InstalledApp], query: String, launchCounts: [String: Int]) -> [InstalledApp] {
+        apps
+            .compactMap { app in score(name: app.name, bundleID: app.bundleID, query: query).map { (app, $0) } }
+            .sorted { a, b in
+                if a.1 != b.1 { return a.1 > b.1 }
+                let launchesA = launchCounts[a.0.bundleID] ?? 0
+                let launchesB = launchCounts[b.0.bundleID] ?? 0
+                if launchesA != launchesB { return launchesA > launchesB }
+                return a.0.name.localizedStandardCompare(b.0.name) == .orderedAscending
+            }
+            .map(\.0)
+    }
+
+    /// Case-, diacritic- and width-folded, with whitespace runs collapsed to one space.
+    private static func normalize(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    /// Folded words, split on anything that isn't a letter or digit and at
+    /// lower-to-upper camel humps ("TablePlus" → "table", "plus").
+    private static func words(in name: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var previous: Character?
+        for char in name {
+            if !(char.isLetter || char.isNumber) {
+                if !current.isEmpty { words.append(current) }
+                current = ""
+            } else {
+                if let previous, previous.isLowercase, char.isUppercase, !current.isEmpty {
+                    words.append(current)
+                    current = ""
+                }
+                current.append(char)
+            }
+            previous = char
+        }
+        if !current.isEmpty { words.append(current) }
+        return words.map(normalize)
     }
 }
 
@@ -401,6 +582,7 @@ final class StartMenuFooterButton: NSView {
 
 final class StartMenuView: NSView, NSSearchFieldDelegate {
     var onLaunch: ((String) -> Void)?
+    var onReveal: ((String) -> Void)?
     var onSettings: (() -> Void)?
     var onQuit: (() -> Void)?
     var onPower: ((PowerAction) -> Void)?
@@ -416,7 +598,7 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
 
     private var pinnedApps: [(String, String)] = []
     private var filteredApps: [(String, String)] = []
-    private var resultRows: [StartMenuRow] = []
+    private var rows: [StartMenuRow] = []
     private var selectedIndex: Int = -1
     private var searchVisible = false
     private var searchHeightConstraint: NSLayoutConstraint?
@@ -475,6 +657,8 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
 
         pinnedApps = Self.loadPinnedApps()
         rebuildRows(apps: pinnedApps, allowSelection: false)
+        NotificationCenter.default.addObserver(self, selector: #selector(pinnedAppsChanged), name: .pinnedAppsChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appCatalogChanged), name: .appCatalogChanged, object: nil)
 
         let settings = StartMenuFooterButton(title: "Settings", symbolName: "gearshape")
         settings.onClick = { [weak self] in self?.onSettings?() }
@@ -532,24 +716,22 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
             stack.widthAnchor.constraint(equalToConstant: bounds.width > 0 ? bounds.width - 16 : 344)
         ])
 
-        // Warm the app catalog in the background so the first keystroke is snappy.
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = AppCatalog.allApps()
-        }
+        // Rescans in the background if needed; search answers from the last scan meanwhile.
+        AppCatalog.shared.refreshIfStale()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Handles navigation / shortcuts while searching. Returns true if the event was consumed.
+    /// Arrow / Enter navigation over the pinned list or search results, plus search
+    /// shortcuts. Returns true if the event was consumed.
     @discardableResult
-    func handleSearchKeyDown(_ event: NSEvent) -> Bool {
-        guard searchVisible else { return false }
-
+    func handleNavigationKeyDown(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.keyCode
 
         // Ctrl+A / Cmd+A — select all search text (Windows-style Ctrl+A included).
-        if (flags.contains(.control) || flags.contains(.command))
+        if searchVisible
+            && (flags.contains(.control) || flags.contains(.command))
             && !flags.contains(.option)
             && !flags.contains(.shift)
             && (event.charactersIgnoringModifiers?.lowercased() == "a") {
@@ -567,12 +749,17 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
             return true
         }
 
-        if key == 36 || key == 76 { // Return / keypad Enter
-            _ = launchSelectedResult()
+        if key == 36 || key == 76 { // Return / keypad Enter; ⌘ shows the app in Finder
+            guard let bundleID = selectedBundleID else { return searchVisible }
+            if flags.contains(.command) {
+                onReveal?(bundleID)
+            } else {
+                onLaunch?(bundleID)
+            }
             return true
         }
 
-        if key == 53 { // Escape — exit search back to pinned
+        if searchVisible, key == 53 { // Escape — exit search back to pinned
             clearSearch()
             return true
         }
@@ -648,36 +835,35 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         window?.makeFirstResponder(nil)
     }
 
-    @discardableResult
-    func launchSelectedResult() -> Bool {
-        guard searchVisible, !filteredApps.isEmpty else { return false }
-        let index = selectedIndex >= 0 ? selectedIndex : 0
-        guard filteredApps.indices.contains(index) else { return false }
-        onLaunch?(filteredApps[index].0)
-        return true
+    /// Search launches the top result even before an arrow key is pressed; the
+    /// pinned list only acts on an explicit selection.
+    private var selectedBundleID: String? {
+        let index = searchVisible ? max(selectedIndex, 0) : selectedIndex
+        return filteredApps.indices.contains(index) ? filteredApps[index].0 : nil
     }
 
+    /// Wraps around at either end, as Windows' Start list does.
     private func moveSelection(by delta: Int) {
-        guard searchVisible, !filteredApps.isEmpty else { return }
+        let count = filteredApps.count
+        guard count > 0 else { return }
         if selectedIndex < 0 {
-            selectedIndex = delta > 0 ? 0 : filteredApps.count - 1
+            selectedIndex = delta > 0 ? 0 : count - 1
         } else {
-            let next = selectedIndex + delta
-            selectedIndex = max(0, min(filteredApps.count - 1, next))
+            selectedIndex = ((selectedIndex + delta) % count + count) % count
         }
         applySelectionHighlight()
         scrollSelectedRowIntoView()
     }
 
     private func applySelectionHighlight() {
-        for (i, row) in resultRows.enumerated() {
+        for (i, row) in rows.enumerated() {
             row.setSelected(i == selectedIndex)
         }
     }
 
     private func scrollSelectedRowIntoView() {
-        guard resultRows.indices.contains(selectedIndex) else { return }
-        let row = resultRows[selectedIndex]
+        guard rows.indices.contains(selectedIndex) else { return }
+        let row = rows[selectedIndex]
         let rowFrame = row.convert(row.bounds, to: document)
         scroll.contentView.scrollToVisible(rowFrame)
     }
@@ -734,16 +920,33 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         }
         titleLabel.stringValue = "APPS"
 
-        let lowered = trimmed.lowercased()
-        let matches = AppCatalog.allApps().filter { app in
-            app.name.lowercased().contains(lowered) || app.bundleID.lowercased().contains(lowered)
-        }
+        let matches = StartSearchRanker.rank(
+            AppCatalog.shared.apps,
+            query: trimmed,
+            launchCounts: StartLaunchCounts.all
+        )
         rebuildRows(apps: matches.map { ($0.bundleID, $0.name) }, allowSelection: true)
     }
 
+    @objc private func pinnedAppsChanged() {
+        pinnedApps = Self.loadPinnedApps()
+        if !searchVisible {
+            rebuildRows(apps: pinnedApps, allowSelection: false)
+        }
+    }
+
+    /// A rescan finished — results typed against the previous catalog may be stale.
+    @objc private func appCatalogChanged() {
+        if searchVisible {
+            applySearch(query: searchField.stringValue)
+        }
+    }
+
+    /// `allowSelection` preselects the first row (search results, so Enter launches
+    /// the best match); the pinned list starts with nothing selected.
     private func rebuildRows(apps: [(String, String)], allowSelection: Bool) {
         filteredApps = apps
-        resultRows = []
+        rows = []
         stack.arrangedSubviews.forEach {
             stack.removeArrangedSubview($0)
             $0.removeFromSuperview()
@@ -754,17 +957,11 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
             let row = makeRow(bundleID: bundleID, name: name)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-            if allowSelection, let startRow = row as? StartMenuRow {
-                resultRows.append(startRow)
-            }
+            rows.append(row)
         }
 
-        if allowSelection {
-            selectedIndex = apps.isEmpty ? -1 : 0
-            applySelectionHighlight()
-        } else {
-            selectedIndex = -1
-        }
+        selectedIndex = allowSelection && !apps.isEmpty ? 0 : -1
+        applySelectionHighlight()
 
         if apps.isEmpty && searchVisible && hasSearchQuery {
             let empty = NSTextField(labelWithString: "No apps found")
@@ -813,10 +1010,38 @@ final class StartMenuView: NSView, NSSearchFieldDelegate {
         return apps
     }
 
-    private func makeRow(bundleID: String, name: String) -> NSView {
+    private func makeRow(bundleID: String, name: String) -> StartMenuRow {
         let row = StartMenuRow(bundleID: bundleID, name: name)
         row.onClick = { [weak self] id in self?.onLaunch?(id) }
+        row.onContextMenu = { [weak self, weak row] event in
+            guard let self, let row else { return }
+            self.showContextMenu(for: bundleID, on: row, with: event)
+        }
         return row
+    }
+
+    private func showContextMenu(for bundleID: String, on row: StartMenuRow, with event: NSEvent) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let pinTitle = PinManager.isPinned(bundleID) ? "Unpin from taskbar" : "Pin to taskbar"
+        menu.addItem(StartMenuActionItem(title: pinTitle) {
+            PinManager.togglePin(bundleID: bundleID)
+        })
+        menu.addItem(StartMenuActionItem(title: "Show in Finder") { [weak self] in
+            self?.onReveal?(bundleID)
+        })
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if !running.isEmpty {
+            menu.addItem(.separator())
+            menu.addItem(StartMenuActionItem(title: "Quit") {
+                running.forEach { $0.terminate() }
+            })
+        }
+
+        // Same as the power menu: the menu's tracking loop must not trip outside-click dismissal.
+        onMenuSessionChange?(true)
+        NSMenu.popUpContextMenu(menu, with: event, for: row)
+        onMenuSessionChange?(false)
     }
 
     private func showPowerMenu() {
@@ -852,9 +1077,27 @@ private final class PowerActionBox: NSObject {
     init(_ action: PowerAction) { self.action = action }
 }
 
+/// Menu item that runs a closure, for the per-row context menu.
+private final class StartMenuActionItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError() }
+
+    @objc private func fire() {
+        handler()
+    }
+}
+
 final class StartMenuRow: NSView {
     let bundleID: String
     var onClick: ((String) -> Void)?
+    var onContextMenu: ((NSEvent) -> Void)?
     private var tracking: NSTrackingArea?
     private var isSelected = false
     private var isHovered = false
@@ -887,7 +1130,7 @@ final class StartMenuRow: NSView {
 
     private func refreshHighlight() {
         if isSelected {
-            layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.47, blue: 0.84, alpha: 0.55).cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.controlAccentColor.withAlphaComponent(0.55))
         } else if isHovered {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
         } else {
@@ -913,6 +1156,15 @@ final class StartMenuRow: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        onClick?(bundleID)
+        // ⌃-click is a right-click on a Mac trackpad or one-button mouse.
+        if event.modifierFlags.contains(.control) {
+            onContextMenu?(event)
+        } else {
+            onClick?(bundleID)
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onContextMenu?(event)
     }
 }

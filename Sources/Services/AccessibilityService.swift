@@ -15,18 +15,74 @@ private func BMTSetFrontProcessWithOptions(
 ) -> OSStatus
 private let kBMTFrontWindowOnly: OptionBits = 1
 
+// Private but stable since 10.x: the CGWindowID behind an AX window. Every macOS window
+// manager (Rectangle, AltTab, yabai) relies on it — there is no public AX→CG mapping.
+@_silgen_name("_AXUIElementGetWindow")
+private func BMTAXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 enum AccessibilityService {
+    /// AX calls block until the target app answers, and the default is ~6s. Enumeration
+    /// runs on the main thread, so one beachballing app would freeze the taskbar that
+    /// long per call. A responsive app answers in well under a millisecond.
+    static let messagingTimeout: Float = 0.25
+
     static func isTrusted(prompt: Bool) -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
+        // The value of kAXTrustedCheckOptionPrompt. The SDK imports that constant as a
+        // mutable global, which strict concurrency rejects as shared state.
+        let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    static func windows(for pid: pid_t) -> [AXUIElement] {
+    /// The only way this app should create an application element. The timeout is
+    /// per element, so it is also applied to every window element handed out below.
+    static func applicationElement(for pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        return app
+    }
+
+    static func windows(for pid: pid_t) -> [AXUIElement] {
+        windowsIfResponsive(for: pid) ?? []
+    }
+
+    /// Standard windows for `pid`, or nil when the app did not answer within the
+    /// messaging timeout. Distinct from an empty list: a hung app still has windows,
+    /// and callers keep showing them rather than dropping them.
+    static func windowsIfResponsive(for pid: pid_t) -> [AXUIElement]? {
+        let app = applicationElement(for: pid)
         var value: CFTypeRef?
+        let started = CFAbsoluteTimeGetCurrent()
         let result = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
-        guard result == .success, let array = value as? [AXUIElement] else { return [] }
-        return array.filter { isStandardWindow($0) }
+        guard result == .success else {
+            // cannotComplete is also returned instantly by apps that are still launching
+            // or have no AX support; only a call that burned the timeout means "hung".
+            let timedOut = result == .cannotComplete
+                && CFAbsoluteTimeGetCurrent() - started >= Double(messagingTimeout) * 0.8
+            return timedOut ? nil : []
+        }
+        return axElements(value).filter { isStandardWindow($0) }
+    }
+
+    /// The window's CGWindowID, straight from the window server — exact even when
+    /// titles are blank or two windows share a frame.
+    static func windowID(of element: AXUIElement) -> CGWindowID? {
+        var windowID: CGWindowID = 0
+        guard BMTAXUIElementGetWindow(element, &windowID) == .success, windowID != 0 else { return nil }
+        return windowID
+    }
+
+    /// Type-checked AX element array from a raw attribute value, with the messaging
+    /// timeout applied (elements do not inherit it from the app element).
+    static func axElements(_ value: CFTypeRef?) -> [AXUIElement] {
+        guard let array = value as? [CFTypeRef] else { return [] }
+        return array.compactMap { axElement($0) }
+    }
+
+    private static func axElement(_ value: CFTypeRef?) -> AXUIElement? {
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        let element = value as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        return element
     }
 
     static func isStandardWindow(_ element: AXUIElement) -> Bool {
@@ -87,15 +143,15 @@ enum AccessibilityService {
 
     /// Front window for an app. Prefer focused (updates on click); main is a fallback.
     static func frontWindow(for pid: pid_t) -> AXUIElement? {
-        let app = AXUIElementCreateApplication(pid)
+        let app = applicationElement(for: pid)
         var value: CFTypeRef?
         if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value) == .success,
-           let focused = value {
-            return (focused as! AXUIElement)
+           let focused = axElement(value) {
+            return focused
         }
         if AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &value) == .success,
-           let main = value {
-            return (main as! AXUIElement)
+           let main = axElement(value) {
+            return main
         }
         return nil
     }
@@ -291,11 +347,8 @@ enum AccessibilityService {
           return "err"
         end if
         """
-        var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
-        let value = result.stringValue ?? ""
-        return error == nil && value == "ok"
+        let (result, error) = runScript(source)
+        return error == nil && result?.stringValue == "ok"
     }
 
     /// Activate / unhide an app when AX and AppleScript deminimize are unavailable.
@@ -316,8 +369,17 @@ enum AccessibilityService {
         NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
     }
 
-    /// Front-to-back window titles from the app's scripting interface.
-    static func scriptedWindowTitles(bundleID: String) -> [String] {
+    /// Front-to-back window titles from the app's scripting interface, fetched on the
+    /// script queue and delivered on main. Asynchronous because a busy browser can take
+    /// up to the script timeout to answer, and this is polled from the refresh loop.
+    static func fetchScriptedWindowTitles(bundleID: String, completion: @escaping @MainActor @Sendable ([String]) -> Void) {
+        scriptQueue.async {
+            let titles = scriptedWindowTitlesOnScriptQueue(bundleID: bundleID)
+            DispatchQueue.main.async { completion(titles) }
+        }
+    }
+
+    private static func scriptedWindowTitlesOnScriptQueue(bundleID: String) -> [String] {
         let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
         _ = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false)
         let source = """
@@ -333,10 +395,8 @@ enum AccessibilityService {
           end try
         end tell
         """
-        var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return [] }
-        let result = script.executeAndReturnError(&error)
-        guard error == nil else { return [] }
+        let (result, error) = runScriptOnScriptQueue(source)
+        guard error == nil, let result else { return [] }
 
         var titles: [String] = []
         let count = result.numberOfItems
@@ -470,14 +530,13 @@ enum AccessibilityService {
         end if
         return how
         """
-        var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return "err:no-script" }
-        let result = script.executeAndReturnError(&error)
+        let (result, error) = runScript(source)
         if let error {
             let msg = error[NSAppleScript.errorMessage] as? String ?? "\(error)"
             let num = error[NSAppleScript.errorNumber] as? Int ?? 0
             return "err:ns:\(num):\(msg)"
         }
+        guard let result else { return "err:no-script" }
         return result.stringValue ?? "err:empty"
     }
 
@@ -507,11 +566,8 @@ enum AccessibilityService {
         end try
         return "err"
         """
-        var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
-        let value = result.stringValue ?? ""
-        return error == nil && value.hasPrefix("ok")
+        let (result, error) = runScript(source)
+        return error == nil && (result?.stringValue ?? "").hasPrefix("ok")
     }
 
     /// Synthetic ⌘M — only delivered when this process has Accessibility (or equivalent Input Monitoring).
@@ -525,34 +581,56 @@ enum AccessibilityService {
         keyUp?.post(tap: .cghidEventTap)
     }
 
-    /// Live AX window for a taskbar entry — cached ref, then title match, then first window.
-    static func resolveWindow(pid: pid_t, title: String, cached: AXUIElement?) -> AXUIElement? {
-        let axWindows = windows(for: pid)
-        if let cached, axWindows.contains(where: { CFEqual($0, cached) }) {
-            return cached
+    /// Minimize a window that is in full screen. Full-screen windows ignore AXMinimized,
+    /// so leave full screen first; minimize requests sent during the Space transition
+    /// are dropped as well, so keep retrying until one sticks. Blocks for up to ~2s.
+    static func minimizeLeavingFullScreen(_ element: AXUIElement) -> Bool {
+        AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, kCFBooleanFalse)
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.15)
+            guard !isFullScreen(element) else { continue }
+            minimize(element)
+            if isMinimized(element) { return true }
         }
-        if !title.isEmpty {
-            if let match = axWindows.first(where: { self.title(of: $0) == title }) {
-                return match
-            }
-        }
-        return axWindows.first
+        return false
     }
 
     /// Close one window (not quit). Presses the AX close button; falls back to Cmd+W.
-    static func close(_ element: AXUIElement, pid: pid_t? = nil) {
+    static func close(_ element: AXUIElement, pid: pid_t) {
         var closeButton: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &closeButton)
-        if result == .success, let button = closeButton {
-            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+        if result == .success, let button = axElement(closeButton) {
+            AXUIElementPerformAction(button, kAXPressAction as CFString)
             return
         }
-        // Fallback: focus the window then send Cmd+W (closes window, does not quit).
+        // Raise first so Cmd+W lands on this window rather than a sibling.
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        if let pid, let app = NSRunningApplication(processIdentifier: pid) {
-            _ = app.activate(options: [.activateIgnoringOtherApps])
+        closeFrontWindowViaCommandW(pid: pid)
+    }
+
+    /// Cmd+W to `pid`'s front window (closes the window, does not quit). Activation is
+    /// asynchronous, so a keystroke sent straight after it lands in whatever app was
+    /// still frontmost — closing, say, a Safari tab. Wait for `pid` to really be in
+    /// front and give up rather than guess. Blocks for up to ~300ms.
+    @discardableResult
+    static func closeFrontWindowViaCommandW(pid: pid_t) -> Bool {
+        func isFrontmost() -> Bool {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
         }
-        postCommandW()
+        if !isFrontmost() {
+            activateFrontWindowOnly(pid: pid)
+        }
+        let deadline = Date().addingTimeInterval(0.3)
+        while !isFrontmost() {
+            guard Date() < deadline else {
+                AppLog.warn("cmd-W close skipped: app never became frontmost", ["pid": Int(pid)])
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        postCommandW(to: pid)
+        return true
     }
 
     /// Close a window by title via AppleScript / System Events (no cached AX required).
@@ -620,22 +698,20 @@ enum AccessibilityService {
           return "err"
         end if
         """
-        var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return false }
-        let result = script.executeAndReturnError(&error)
-        let value = result.stringValue ?? ""
-        return error == nil && value == "ok"
+        let (result, error) = runScript(source)
+        return error == nil && result?.stringValue == "ok"
     }
 
-    /// Synthetic ⌘W — closes the front window of the active app without quitting.
-    static func postCommandW() {
+    /// Synthetic ⌘W addressed to `pid`, so it cannot reach another app even if focus
+    /// moves between the frontmost check and delivery.
+    private static func postCommandW(to pid: pid_t) {
         let source = CGEventSource(stateID: .hidSystemState)
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x0D, keyDown: true)
         keyDown?.flags = .maskCommand
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x0D, keyDown: false)
         keyUp?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        keyDown?.postToPid(pid)
+        keyUp?.postToPid(pid)
     }
 
     /// Windows-style Show Desktop via Dock's Mission Control notification.
@@ -673,6 +749,30 @@ enum AccessibilityService {
         return CGRect(origin: position, size: size)
     }
 
+    // MARK: - AppleScript
+
+    /// NSAppleScript is not thread-safe, and raise, minimize, close and title polling
+    /// run scripts from different threads. Every script goes through this one queue.
+    private static let scriptQueue = DispatchQueue(label: "BetterMacTaskbar.applescript", qos: .userInitiated)
+
+    /// Run a script on the script queue, blocking the caller. Not for the main thread —
+    /// a slow target app holds the caller for up to the script timeout per event.
+    private static func runScript(_ source: String) -> (result: NSAppleEventDescriptor?, error: NSDictionary?) {
+        dispatchPrecondition(condition: .notOnQueue(scriptQueue))
+        return scriptQueue.sync { runScriptOnScriptQueue(source) }
+    }
+
+    private static func runScriptOnScriptQueue(_ source: String) -> (result: NSAppleEventDescriptor?, error: NSDictionary?) {
+        dispatchPrecondition(condition: .onQueue(scriptQueue))
+        // Apple events wait two minutes for a reply by default. A hung browser would
+        // hold the queue — and every raise queued behind it — for that long.
+        let bounded = "with timeout of 1 second\n\(source)\nend timeout"
+        guard let script = NSAppleScript(source: bounded) else { return (nil, nil) }
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        return (result, error)
+    }
+
     // MARK: - Helpers
 
     /// Internal rather than private so WindowDiagnostics can report raw role/subrole
@@ -685,25 +785,33 @@ enum AccessibilityService {
 
     private static func boolValue(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
-        return (value as? Bool) ?? ((value as! CFBoolean) == kCFBooleanTrue)
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value else { return nil }
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return CFBooleanGetValue((value as! CFBoolean))
+        }
+        // Some apps answer boolean attributes with a CFNumber.
+        return (value as? NSNumber)?.boolValue
     }
 
     private static func positionValue(_ element: AXUIElement) -> CGPoint? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success,
-              let axValue = value else { return nil }
+        guard let axValue = axValue(element, kAXPositionAttribute as CFString) else { return nil }
         var point = CGPoint.zero
-        guard AXValueGetValue(axValue as! AXValue, .cgPoint, &point) else { return nil }
+        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
         return point
     }
 
     private static func sizeValue(_ element: AXUIElement) -> CGSize? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value) == .success,
-              let axValue = value else { return nil }
+        guard let axValue = axValue(element, kAXSizeAttribute as CFString) else { return nil }
         var size = CGSize.zero
-        guard AXValueGetValue(axValue as! AXValue, .cgSize, &size) else { return nil }
+        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
         return size
+    }
+
+    private static func axValue(_ element: AXUIElement, _ attribute: CFString) -> AXValue? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        return (value as! AXValue)
     }
 }

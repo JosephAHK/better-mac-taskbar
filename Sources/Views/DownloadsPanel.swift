@@ -22,6 +22,7 @@ private final class KeyablePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+@MainActor
 final class DownloadsPanelController {
     static let shared = DownloadsPanelController()
 
@@ -30,6 +31,9 @@ final class DownloadsPanelController {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var isDraggingFile = false
+    private lazy var focus = FlyoutFocus { [weak self] in
+        self?.hide(restoringFocus: false)
+    }
 
     var isVisible: Bool { panel?.isVisible == true }
 
@@ -43,8 +47,12 @@ final class DownloadsPanelController {
         }
     }
 
-    func hide() {
+    /// `restoringFocus: false` when whatever caused the hide moves focus itself.
+    func hide(restoringFocus: Bool = true) {
         let wasVisible = panel != nil
+        if wasVisible {
+            focus.end(restoringFocus: restoringFocus)
+        }
         removeMonitors()
         panel?.orderOut(nil)
         panel = nil
@@ -69,10 +77,10 @@ final class DownloadsPanelController {
         let content = DownloadsPanelView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         content.onOpenInFinder = { [weak self] url in
             NSWorkspace.shared.open(url)
-            self?.hide()
+            self?.hide(restoringFocus: false)
         }
         content.onFileOpened = { [weak self] in
-            self?.hide()
+            self?.hide(restoringFocus: false)
         }
         content.onRequestClose = { [weak self] in
             self?.hide()
@@ -98,7 +106,10 @@ final class DownloadsPanelController {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
         panel.worksWhenModal = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Out of full-screen Spaces like the bar it opens from; dark like the bar
+        // regardless of the system theme (its text is labelColor on a dark tint).
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = content
 
         let screenFrame = window.convertToScreen(view.convert(view.bounds, to: nil))
@@ -106,8 +117,7 @@ final class DownloadsPanelController {
         let y = screenFrame.maxY + 2
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
 
-        // Accessory (LSUIElement) apps must activate before a panel can take keyboard focus.
-        NSApp.activate(ignoringOtherApps: true)
+        focus.begin()
         panel.makeKeyAndOrderFront(nil)
         // Defer so the run loop finishes making the panel key first.
         DispatchQueue.main.async {
@@ -133,20 +143,18 @@ final class DownloadsPanelController {
             self.handleMouseDown(event)
             return event
         }
+        // A click in another app focuses that app; handing focus back would steal it.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, !self.isDraggingFile else { return }
-            self.hide()
+            self.hide(restoringFocus: false)
         }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
-        guard isVisible else { return event }
+        guard isVisible, let content = panel?.contentView as? DownloadsPanelView else { return event }
         if event.keyCode == 53 { // Escape
-            // Let the search field clear its query first; only close when empty.
-            if let content = panel?.contentView as? DownloadsPanelView, content.hasSearchQuery {
-                return event
-            }
-            hide()
+            // Handled here rather than by the search field, which only sees it while focused.
+            content.handleEscape()
             return nil
         }
         return event
@@ -171,15 +179,10 @@ final class DownloadsPanelController {
             let anchorScreen = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
             if anchorScreen.contains(location) { return }
         }
-        hide()
+        // A click elsewhere on the taskbar leaves focus on the taskbar, as on Windows —
+        // and may be a task button activating its own app.
+        hide(restoringFocus: false)
     }
-}
-
-/// One directory listing entry — carries `isDirectory` alongside the URL so
-/// activation logic doesn't need to re-stat the filesystem on every click.
-private struct DownloadEntry {
-    let url: URL
-    let isDirectory: Bool
 }
 
 final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
@@ -194,10 +197,13 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     private let searchField = NSSearchField()
     private let scroll = NSScrollView()
     private let stack = NSStackView()
-    private var folderWatcher: DispatchSourceFileSystemObject?
-    private var folderFD: Int32 = -1
-    private var allFiles: [DownloadEntry] = []
-    private var filteredFiles: [DownloadEntry] = []
+    private let loader = FolderLoader()
+    private var folderWatcher: DirectoryWatcher?
+    /// Nil until the current folder's first listing arrives, so a folder that is
+    /// still loading doesn't flash "empty".
+    private var listing: [FolderEntry]?
+    private var filteredFiles: [FolderEntry] = []
+    private var rowCache = FolderRowCache<DownloadsFileRow>()
     private lazy var currentURL: URL = downloadsURL()
     private var backStack: [URL] = []
     private var isAtRoot: Bool { backStack.isEmpty }
@@ -245,7 +251,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         openButton.bezelStyle = .inline
         openButton.isBordered = false
         openButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        openButton.contentTintColor = NSColor(calibratedRed: 0.35, green: 0.72, blue: 1, alpha: 1)
+        openButton.contentTintColor = .controlAccentColor
         openButton.translatesAutoresizingMaskIntoConstraints = false
 
         searchField.placeholderString = "Search downloads"
@@ -313,10 +319,6 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    deinit {
-        stopWatching()
-    }
-
     func focusSearch() {
         guard let window else { return }
         window.makeKey()
@@ -329,21 +331,26 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
     override var acceptsFirstResponder: Bool { true }
 
-    var hasSearchQuery: Bool {
-        !searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     @objc private func openFinder() {
         onOpenInFinder?(currentURL)
     }
 
     @objc private func goBack() {
         guard let previous = backStack.popLast() else { return }
-        currentURL = previous
-        searchField.stringValue = ""
-        updateHeader()
-        reloadFromDisk()
-        startWatching()
+        show(folder: previous)
+    }
+
+    /// Escape steps out one level at a time: clear the search, then go back up a
+    /// folder, and only close from the top level.
+    func handleEscape() {
+        if !searchField.stringValue.isEmpty {
+            searchField.stringValue = ""
+            applyFilter()
+        } else if !isAtRoot {
+            goBack()
+        } else {
+            onRequestClose?()
+        }
     }
 
     @objc private func searchChanged(_ sender: NSSearchField) {
@@ -356,14 +363,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(cancelOperation(_:)) {
-            if !searchField.stringValue.isEmpty {
-                searchField.stringValue = ""
-                applyFilter()
-            } else if !isAtRoot {
-                goBack()
-            } else {
-                onRequestClose?()
-            }
+            handleEscape()
             return true
         }
         if commandSelector == #selector(insertNewline(_:)) {
@@ -379,7 +379,7 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     }
 
     /// Navigate into a folder in-place, or open a file with its default app.
-    private func activate(_ entry: DownloadEntry) {
+    private func activate(_ entry: FolderEntry) {
         if entry.isDirectory {
             navigate(to: entry.url)
         } else {
@@ -390,9 +390,15 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
 
     private func navigate(to url: URL) {
         backStack.append(currentURL)
+        show(folder: url)
+    }
+
+    private func show(folder url: URL) {
         currentURL = url
         searchField.stringValue = ""
+        listing = nil
         updateHeader()
+        applyFilter()
         reloadFromDisk()
         startWatching()
     }
@@ -402,14 +408,19 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
         backButton.isHidden = isAtRoot
     }
 
-    private func delete(_ entry: DownloadEntry) {
+    private func delete(_ entry: FolderEntry) {
         var resultingItemURL: NSURL?
         do {
             try FileManager.default.trashItem(at: entry.url, resultingItemURL: &resultingItemURL)
             if let trashedURL = resultingItemURL as URL? {
                 TrashOriginStore.record(trashedURL: trashedURL, originalURL: entry.url)
             }
-        } catch {}
+        } catch {
+            ErrorAlert.show(
+                title: "Couldn’t Move “\(entry.url.lastPathComponent)” to the Trash",
+                message: error.localizedDescription
+            )
+        }
         reloadFromDisk()
     }
 
@@ -419,113 +430,62 @@ final class DownloadsPanelView: NSView, NSSearchFieldDelegate {
     }
 
     private func reloadFromDisk() {
-        let url = currentURL
-        let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .nameKey]
-        let files = (try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        let entries = files.map { fileURL in
-            let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            return DownloadEntry(url: fileURL, isDirectory: isDirectory)
+        loader.load(currentURL) { [weak self] result in
+            guard let self else { return }
+            self.listing = (try? result.get()) ?? []
+            self.applyFilter()
         }
-        allFiles = entries.sorted { a, b in
-            let da = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let db = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return da > db
-        }
-        applyFilter()
     }
 
     private func applyFilter() {
-        stack.arrangedSubviews.forEach {
-            stack.removeArrangedSubview($0)
-            $0.removeFromSuperview()
-        }
-
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.isEmpty {
-            filteredFiles = allFiles
-        } else {
-            let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
-            filteredFiles = allFiles.filter { entry in
-                let name = entry.url.lastPathComponent
-                return tokens.allSatisfy { name.localizedCaseInsensitiveContains($0) }
-            }
-        }
-
-        if filteredFiles.isEmpty {
-            let message = allFiles.isEmpty
-                ? (isAtRoot ? "No downloads yet" : "This folder is empty")
-                : "No matches"
-            let empty = NSTextField(labelWithString: message)
-            empty.font = NSFont.systemFont(ofSize: 13)
-            empty.textColor = .secondaryLabelColor
-            empty.alignment = .center
-            empty.translatesAutoresizingMaskIntoConstraints = false
-            let wrap = NSView()
-            wrap.translatesAutoresizingMaskIntoConstraints = false
-            wrap.addSubview(empty)
-            NSLayoutConstraint.activate([
-                wrap.heightAnchor.constraint(equalToConstant: 80),
-                empty.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
-                empty.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-                wrap.widthAnchor.constraint(equalToConstant: bounds.width - 16)
-            ])
-            stack.addArrangedSubview(wrap)
+        guard let listing else {
+            filteredFiles = []
+            FolderList.setRows([], in: stack)
             return
         }
 
-        // Cap the unfiltered list for responsiveness; show every match when searching.
-        let displayed = query.isEmpty ? Array(filteredFiles.prefix(150)) : filteredFiles
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        filteredFiles = FolderList.filter(listing, query: query)
         let rowWidth = max(bounds.width - 16, 300)
-        for entry in displayed {
-            let row = DownloadsFileRow(entry: entry, width: rowWidth)
-            row.onOpen = { [weak self] in
-                self?.activate(entry)
-            }
-            row.onReveal = {
-                NSWorkspace.shared.activateFileViewerSelecting([entry.url])
-            }
-            row.onDelete = { [weak self] in
-                self?.delete(entry)
-            }
-            row.onDragBegan = { [weak self] in self?.onDragBegan?() }
-            row.onDragEnded = { [weak self] in self?.onDragEnded?() }
-            stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
+
+        if filteredFiles.isEmpty {
+            let message = listing.isEmpty
+                ? (isAtRoot ? "No downloads yet" : "This folder is empty")
+                : "No matches"
+            FolderList.setRows([rowCache.messageRow(message, width: rowWidth)], in: stack)
+            return
         }
+
+        let displayed = Array(filteredFiles.prefix(FolderList.displayLimit))
+        var rows: [NSView] = rowCache.rows(for: displayed) { makeRow(for: $0, width: rowWidth) }
+        if filteredFiles.count > displayed.count {
+            let overflow = FolderList.overflowText(hiddenCount: filteredFiles.count - displayed.count)
+            rows.append(rowCache.messageRow(overflow, width: rowWidth, height: 36))
+        }
+        FolderList.setRows(rows, in: stack)
+    }
+
+    private func makeRow(for entry: FolderEntry, width: CGFloat) -> DownloadsFileRow {
+        let row = DownloadsFileRow(entry: entry, width: width)
+        row.onOpen = { [weak self] in
+            self?.activate(entry)
+        }
+        row.onReveal = {
+            NSWorkspace.shared.activateFileViewerSelecting([entry.url])
+        }
+        row.onDelete = { [weak self] in
+            self?.delete(entry)
+        }
+        row.onDragBegan = { [weak self] in self?.onDragBegan?() }
+        row.onDragEnded = { [weak self] in self?.onDragEnded?() }
+        row.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return row
     }
 
     private func startWatching() {
-        stopWatching()
-        let path = currentURL.path
-        folderFD = open(path, O_EVTONLY)
-        guard folderFD >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: folderFD,
-            eventMask: [.write, .rename, .delete, .extend, .attrib],
-            queue: .main
-        )
-        source.setEventHandler { [weak self] in
+        folderWatcher = DirectoryWatcher(url: currentURL) { [weak self] in
             self?.reloadFromDisk()
         }
-        source.setCancelHandler { [weak self] in
-            if let self, self.folderFD >= 0 {
-                close(self.folderFD)
-                self.folderFD = -1
-            }
-        }
-        folderWatcher = source
-        source.resume()
-    }
-
-    private func stopWatching() {
-        folderWatcher?.cancel()
-        folderWatcher = nil
     }
 }
 
@@ -540,11 +500,12 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
 
     private let deleteButton = NSButton()
     private let iconView = NSImageView()
+    private var thumbnailRequest: Operation?
     private var tracking: NSTrackingArea?
     private var mouseDownPoint: NSPoint?
     private var didStartDrag = false
 
-    init(entry: DownloadEntry, width: CGFloat) {
+    init(entry: FolderEntry, width: CGFloat) {
         self.url = entry.url
         self.isDirectory = entry.isDirectory
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 40))
@@ -556,8 +517,7 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
         iconView.image = NSWorkspace.shared.icon(forFile: url.path)
         addSubview(iconView)
         if !entry.isDirectory, ImageThumbnailer.isImage(url) {
-            ImageThumbnailer.thumbnail(for: url, maxPixelSize: 56) { [weak iconView] image in
-                guard let image else { return }
+            thumbnailRequest = ImageThumbnailer.thumbnail(for: url, modified: entry.modified, maxPixelSize: 56) { [weak iconView] image in
                 iconView?.image = image
             }
         }
@@ -594,6 +554,15 @@ private final class DownloadsFileRow: NSView, NSDraggingSource {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A row leaves its window when the list drops it or the panel closes; its
+    /// thumbnail is no longer worth decoding.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            thumbnailRequest?.cancel()
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

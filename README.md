@@ -17,7 +17,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Middle-click closes a window
 - Optional Dock replacement (Dock fully hidden while running; restored on quit)
 - Optional auto-hide taskbar
-- Launch at login
+- Launch at login (off until you turn it on in Settings)
 - App log file for diagnosing unexpected quits (`~/Library/Logs/BetterMacTaskbar/app.log`), plus `scripts/bmt-log` for a live view and on-demand window snapshots
 
 ## Requirements
@@ -33,9 +33,20 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 **From source:**
 
 ```bash
-./package.sh          # builds → releases/
+./package.sh            # builds → releases/
 ./package.sh --publish  # tag + upload to GitHub Releases (needs `gh`)
 ```
+
+Distributable (Gatekeeper-friendly) installers need a **Developer ID Application** and a **Developer ID Installer** identity in your keychain, plus a notarytool profile:
+
+```bash
+xcrun notarytool store-credentials bmt-notary --apple-id … --team-id …
+BMT_NOTARY_PROFILE=bmt-notary ./package.sh --publish
+```
+
+With those, `package.sh` signs with the hardened runtime, notarizes, and staples the app, `.pkg` and `.dmg`. Without them it still builds local installers but warns that Gatekeeper will block them, and `--publish` refuses unless you pass `--allow-unnotarized`. Publishing also refuses a dirty working tree or a version tag that already exists on another commit.
+
+**Versioning:** `CFBundleShortVersionString` in `Resources/Info.plist` is the single source of truth for the version (and the release tag, `v<version>`) — bump it by hand for each release. `CFBundleVersion` is stamped into the built app by `build.sh` from `git rev-list --count HEAD`; the source plist's value is only a fallback outside git.
 
 Then open **Better Mac Taskbar** from Applications and grant Accessibility (see below).
 
@@ -45,10 +56,12 @@ Then open **Better Mac Taskbar** from Applications and grant Accessibility (see 
 git clone https://github.com/JosephAHK/better-mac-taskbar.git
 cd better-mac-taskbar
 ./build.sh
-open "build/Better Mac Taskbar.app"
+open "$(cat build/.run-app-path)"
 ```
 
-`build.sh` compiles all Swift sources, packages an `.app` bundle, and codesigns it (Apple Development identity if available, otherwise a stable local identity, otherwise ad-hoc).
+`build.sh` compiles all Swift sources, packages an `.app` bundle, codesigns it with the hardened runtime (Apple Development identity if available, otherwise a stable local identity, otherwise ad-hoc), and installs it to `/Applications` (or `~/Applications`). `build/.run-app-path` records the installed copy — always run that one, not the intermediate bundle in `build/`, so macOS only ever sees one app with this bundle id.
+
+The local signing identity lives in `~/Library/Application Support/BetterMacTaskbar/signing`, so deleting `build/` doesn't cost you your Accessibility grant.
 
 ## Permissions
 
@@ -68,8 +81,9 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Taskbar buttons: **Compact** (icons only) or **Wide** (icons with window titles, like Windows 10/11)
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar
-- Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key)
-- Launch at login
+- Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.
+- Launch at login (shows when it still needs approval in System Settings → Login Items)
+- Import / Export settings as JSON, and Reset to defaults
 
 ## Project layout
 

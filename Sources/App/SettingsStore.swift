@@ -1,8 +1,10 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Observable bridge between SwiftUI settings UI and `TaskbarSettings` / system services.
+@MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
@@ -17,11 +19,7 @@ final class SettingsStore: ObservableObject {
         didSet {
             guard replaceDock != TaskbarSettings.shared.replaceDock else { return }
             TaskbarSettings.shared.replaceDock = replaceDock
-            if replaceDock {
-                DockManager.enableReplaceMode()
-            } else {
-                DockManager.restoreDock()
-            }
+            Self.applyDockMode()
         }
     }
 
@@ -64,12 +62,17 @@ final class SettingsStore: ObservableObject {
 
     @Published var launchAtLogin: Bool {
         didSet {
-            guard launchAtLogin != LaunchAtLogin.isEnabled else { return }
+            guard launchAtLogin != LaunchAtLogin.isRegistered else { return }
             if !LaunchAtLogin.setEnabled(launchAtLogin) {
-                launchAtLogin = LaunchAtLogin.isEnabled
+                launchAtLogin = LaunchAtLogin.isRegistered
             }
+            launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         }
     }
+
+    /// Registered but switched off in System Settings → Login Items, so the app
+    /// will not actually launch at login until the user approves it there.
+    @Published private(set) var launchAtLoginNeedsApproval: Bool
 
     @Published var hotkeyEnabled: Bool {
         didSet {
@@ -107,33 +110,31 @@ final class SettingsStore: ObservableObject {
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
-        launchAtLogin = LaunchAtLogin.isEnabled
+        launchAtLogin = LaunchAtLogin.isRegistered
+        launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
 
+        // `queue: .main` guarantees the main thread, which is what makes
+        // assumeIsolated sound here.
         observers.append(NotificationCenter.default.addObserver(
             forName: .hiddenAppsChanged, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.reloadHiddenApps()
+            MainActor.assumeIsolated { self?.reloadHiddenApps() }
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: .startMenuHotkeyChanged, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.reloadHotkey()
+            MainActor.assumeIsolated { self?.reloadHotkey() }
         })
 
         reloadHiddenApps()
     }
 
-    deinit {
-        observers.forEach { NotificationCenter.default.removeObserver($0) }
-        accessibilityTimer?.invalidate()
-    }
-
     /// Re-sync values that outside code (or the system) can change while the window is closed.
     func refresh() {
-        launchAtLogin = LaunchAtLogin.isEnabled
+        refreshSystemStatus()
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
@@ -141,19 +142,29 @@ final class SettingsStore: ObservableObject {
         autoHideRevealZone = Double(TaskbarSettings.shared.autoHideRevealZone)
         autoHideDelay = TaskbarSettings.shared.autoHideDelay
         buttonStyle = TaskbarSettings.shared.buttonStyle
-        accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         reloadHiddenApps()
         reloadHotkey()
+    }
+
+    /// State owned by System Settings, which the user may have just changed there.
+    /// Cheap enough to run every time the Settings window becomes key.
+    func refreshSystemStatus() {
+        launchAtLogin = LaunchAtLogin.isRegistered
+        launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
+        accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
     }
 
     /// Accessibility can be granted outside the app, so poll while the window is visible.
     func startWatchingAccessibility() {
         accessibilityTimer?.invalidate()
+        // Scheduled on the main run loop below, so the block always runs on main.
         let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let trusted = AccessibilityService.isTrusted(prompt: false)
-            if trusted != self.accessibilityTrusted {
-                self.accessibilityTrusted = trusted
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let trusted = AccessibilityService.isTrusted(prompt: false)
+                if trusted != self.accessibilityTrusted {
+                    self.accessibilityTrusted = trusted
+                }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -178,6 +189,83 @@ final class SettingsStore: ObservableObject {
     func resetHotkey() {
         HotkeyRecorder.shared.cancel()
         TaskbarSettings.shared.startMenuHotkey = .default
+    }
+
+    func openLoginItemsSettings() {
+        LaunchAtLogin.openSystemSettings()
+    }
+
+    // MARK: Reset / import / export
+
+    func resetToDefaults() {
+        let alert = NSAlert()
+        alert.messageText = "Reset all settings to their defaults?"
+        alert.informativeText = "This also clears your pinned apps, hidden apps and taskbar order. Launch at login is not changed."
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        applyBulkChange { TaskbarSettings.shared.resetToDefaults() }
+        AppLog.info("settings reset to defaults")
+    }
+
+    func exportSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Better Mac Taskbar Settings.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try TaskbarSettings.shared.exportJSON().write(to: url, options: .atomic)
+            AppLog.info("settings exported", ["path": url.path])
+        } catch {
+            showError("Couldn't export settings", error)
+        }
+    }
+
+    func importSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            try applyBulkChange { try TaskbarSettings.shared.importJSON(data) }
+            AppLog.info("settings imported", ["path": url.path])
+        } catch {
+            AppLog.warn("settings import rejected", ["path": url.path, "error": error.localizedDescription])
+            showError("Couldn't import settings", error)
+        }
+    }
+
+    /// Reset and import write `TaskbarSettings` directly, which bypasses the
+    /// `replaceDock` didSet — so apply the Dock side effect here, then re-sync.
+    private func applyBulkChange(_ change: () throws -> Void) rethrows {
+        HotkeyRecorder.shared.cancel()
+        let replacedDock = TaskbarSettings.shared.replaceDock
+        defer {
+            if TaskbarSettings.shared.replaceDock != replacedDock {
+                Self.applyDockMode()
+            }
+            refresh()
+        }
+        try change()
+    }
+
+    private static func applyDockMode() {
+        if TaskbarSettings.shared.replaceDock {
+            DockManager.enableReplaceMode()
+        } else {
+            DockManager.restoreDock()
+        }
+    }
+
+    private func showError(_ message: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     func openAccessibilitySettings() {
@@ -206,10 +294,14 @@ final class SettingsStore: ObservableObject {
 }
 
 /// Captures the next key combination — or a lone modifier — for the Start menu shortcut.
+@MainActor
 final class HotkeyRecorder: ObservableObject {
     static let shared = HotkeyRecorder()
 
     @Published private(set) var isRecording = false
+    /// Set when the last key pressed while recording was refused; recording
+    /// continues so the user can simply try another combination.
+    @Published private(set) var rejectionHint: String?
 
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
@@ -229,6 +321,7 @@ final class HotkeyRecorder: ObservableObject {
         sawNonModifier = false
         StartHotkeyMonitor.shared.isSuspended = true
 
+        // Local monitors are always called on the main thread.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleKeyDown(event) ?? event
         }
@@ -255,6 +348,10 @@ final class HotkeyRecorder: ObservableObject {
 
         sawNonModifier = true
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard StartMenuHotkey.isAcceptableChord(keyCode: event.keyCode, modifierFlags: mods) else {
+            rejectionHint = "Add ⌘, ⌥ or ⌃ — on its own, that key would stop typing in every app."
+            return nil
+        }
         finish(StartMenuHotkey(keyCode: event.keyCode, modifierFlags: mods.rawValue, modifierOnly: false))
         return nil
     }
@@ -294,6 +391,7 @@ final class HotkeyRecorder: ObservableObject {
             self.flagsMonitor = nil
         }
         isRecording = false
+        rejectionHint = nil
         modifierKeyCode = nil
         sawNonModifier = false
         StartHotkeyMonitor.shared.isSuspended = false

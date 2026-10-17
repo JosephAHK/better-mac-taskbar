@@ -8,17 +8,39 @@ final class TaskbarContentView: NSView {
     private let startMenu = StartMenuController()
     private var startOpen = false
 
-    private weak var tasksStack: NSStackView?
-    /// Width constraints for running-window buttons (may be labeled / wide).
-    private var windowWidthConstraints: [NSLayoutConstraint] = []
-    /// Width constraints for closed pinned / launching placeholders (always square).
-    private var pinnedWidthConstraints: [NSLayoutConstraint] = []
+    private let tasksStack = NSStackView()
+    private let overflowButton = TaskOverflowButtonView()
+    private let overflowButtonWidth: CGFloat = 32
+
+    private struct Slot {
+        let view: NSView
+        let width: NSLayoutConstraint
+    }
+
+    /// One button per strip item, keyed by `DisplayItem.slotKey`. A window-list
+    /// change updates the buttons it touches in place and adds or removes only the
+    /// ones that came or went, instead of rebuilding every button on every screen.
+    private var slots: [String: Slot] = [:]
+    /// Strip contents in display order, as of the last reload.
+    private var items: [DisplayItem] = []
+    /// Leading items that fit on the bar; the rest are listed by the overflow button.
+    private var visibleCount = 0
     private var builtStyle: TaskbarButtonStyle = TaskbarSettings.shared.buttonStyle
+    /// Container width the strip was last fitted to.
+    private var fittedWidth: CGFloat = -1
+
+    private var centeredConstraints: [NSLayoutConstraint] = []
+    private var leadingConstraints: [NSLayoutConstraint] = []
+    private var stackTrailing: NSLayoutConstraint?
+
     private weak var draggingIcon: NSView?
     private var isDraggingIcon = false
     private var dragStartLocation: NSPoint?
     private var didReorderDuringDrag = false
     private var dragMouseUpMonitor: Any?
+    /// A reload arrived mid-drag. Rearranging the stack then would cancel the drag's
+    /// mouse tracking, so it is replayed when the drag ends instead of being lost.
+    private var needsReloadAfterDrag = false
     private let dragThreshold: CGFloat = 6
 
     override init(frame frameRect: NSRect) {
@@ -36,7 +58,8 @@ final class TaskbarContentView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     deinit {
-        endDragMouseUpMonitor()
+        // Views are only ever released on the main thread.
+        MainActor.assumeIsolated { endDragMouseUpMonitor() }
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -77,7 +100,51 @@ final class TaskbarContentView: NSView {
             tasksContainer.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
 
+        setupTasksStrip()
         reload()
+    }
+
+    private func setupTasksStrip() {
+        tasksStack.orientation = .horizontal
+        tasksStack.spacing = 0
+        tasksStack.alignment = .centerY
+        tasksStack.translatesAutoresizingMaskIntoConstraints = false
+        tasksContainer.addSubview(tasksStack)
+
+        overflowButton.translatesAutoresizingMaskIntoConstraints = false
+        overflowButton.isHidden = true
+        overflowButton.entriesProvider = { [weak self] in
+            self?.overflowEntries() ?? []
+        }
+        tasksContainer.addSubview(overflowButton)
+
+        // Center on the whole screen width (like Windows 11), not just the leftover
+        // space between the Start button and tray — those two are rarely symmetric,
+        // so centering within tasksContainer alone visibly drifts off true center.
+        // Lower-priority centerX yields to the required containment constraints
+        // below once there are enough icons to collide with Start/tray.
+        let centerX = tasksStack.centerXAnchor.constraint(equalTo: centerXAnchor)
+        centerX.priority = .defaultHigh
+        centeredConstraints = [centerX]
+        leadingConstraints = [
+            tasksStack.leadingAnchor.constraint(equalTo: tasksContainer.leadingAnchor, constant: 4)
+        ]
+
+        // Containment is required in both alignments so the strip can never run
+        // under the tray; fitButtons() moves whatever doesn't fit into the overflow.
+        let trailing = tasksStack.trailingAnchor.constraint(lessThanOrEqualTo: tasksContainer.trailingAnchor, constant: -4)
+        stackTrailing = trailing
+        NSLayoutConstraint.activate([
+            tasksStack.centerYAnchor.constraint(equalTo: tasksContainer.centerYAnchor),
+            tasksStack.heightAnchor.constraint(equalTo: tasksContainer.heightAnchor),
+            tasksStack.leadingAnchor.constraint(greaterThanOrEqualTo: tasksContainer.leadingAnchor, constant: 4),
+            trailing,
+
+            overflowButton.leadingAnchor.constraint(equalTo: tasksStack.trailingAnchor),
+            overflowButton.topAnchor.constraint(equalTo: tasksContainer.topAnchor),
+            overflowButton.bottomAnchor.constraint(equalTo: tasksContainer.bottomAnchor),
+            overflowButton.widthAnchor.constraint(equalToConstant: overflowButtonWidth)
+        ])
     }
 
     var isStartMenuVisible: Bool { startMenu.isVisible }
@@ -104,136 +171,166 @@ final class TaskbarContentView: NSView {
     }
 
     @objc func reload() {
-        if isDraggingIcon { return }
-
-        let items = Self.orderedDisplayItems()
-        if applyInPlaceIfPossible(items) {
+        if isDraggingIcon {
+            needsReloadAfterDrag = true
             return
         }
+        needsReloadAfterDrag = false
 
-        tasksContainer.subviews.forEach { $0.removeFromSuperview() }
-        windowWidthConstraints.removeAll()
-        pinnedWidthConstraints.removeAll()
+        let center = TaskbarSettings.shared.centerIcons
+        NSLayoutConstraint.deactivate(center ? leadingConstraints : centeredConstraints)
+        NSLayoutConstraint.activate(center ? centeredConstraints : leadingConstraints)
 
         let height = bounds.height > 0 ? bounds.height : TaskbarSettings.shared.barHeight
         let style = TaskbarSettings.shared.buttonStyle
         builtStyle = style
-        let windowCount = items.reduce(0) { partial, item in
-            if case .window = item { return partial + 1 }
-            return partial
-        }
-        let pinnedCount = items.count - windowCount
-        // Closed pins stay square even in Wide mode — only open windows get labels.
-        let pinnedWidth = height
-        let windowWidth = windowButtonWidth(
-            windowCount: windowCount,
-            pinnedCount: pinnedCount,
-            style: style,
-            height: height
-        )
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 0
-        stack.alignment = .centerY
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        tasksContainer.addSubview(stack)
-        tasksStack = stack
+        let newItems = Self.orderedDisplayItems()
 
-        let center = TaskbarSettings.shared.centerIcons
-        if center {
-            // Center on the whole screen width (like Windows 11), not just the leftover
-            // space between the Start button and tray — those two are rarely symmetric,
-            // so centering within tasksContainer alone visibly drifts off true center.
-            // Lower-priority centerX yields to the required containment constraints
-            // below once there are enough icons to collide with Start/tray.
-            let centerX = stack.centerXAnchor.constraint(equalTo: centerXAnchor)
-            centerX.priority = .defaultHigh
-            NSLayoutConstraint.activate([
-                centerX,
-                stack.centerYAnchor.constraint(equalTo: tasksContainer.centerYAnchor),
-                stack.heightAnchor.constraint(equalTo: tasksContainer.heightAnchor),
-                stack.leadingAnchor.constraint(greaterThanOrEqualTo: tasksContainer.leadingAnchor, constant: 4),
-                stack.trailingAnchor.constraint(lessThanOrEqualTo: tasksContainer.trailingAnchor, constant: -4)
-            ])
-        } else {
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: tasksContainer.leadingAnchor, constant: 4),
-                stack.centerYAnchor.constraint(equalTo: tasksContainer.centerYAnchor),
-                stack.heightAnchor.constraint(equalTo: tasksContainer.heightAnchor)
-            ])
-        }
-
-        for item in items {
-            switch item {
-            case .pinned(let bundleID), .launching(let bundleID):
-                let pinned = PinnedButtonView(
-                    bundleID: bundleID,
-                    height: height,
-                    width: pinnedWidth,
-                    style: .compact
-                )
-                pinned.dragDelegate = self
-                pinned.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
-                pinned.onLaunch = { PinManager.launch(bundleID: $0) }
-                pinned.onUnpin = { PinManager.togglePin(bundleID: $0) }
-                pinned.onHide = { HideManager.toggleHidden(bundleID: $0) }
-                stack.addArrangedSubview(pinned)
-                let width = pinned.widthAnchor.constraint(equalToConstant: pinnedWidth)
-                width.isActive = true
-                pinnedWidthConstraints.append(width)
-                pinned.heightAnchor.constraint(equalToConstant: height).isActive = true
-            case .window(let info):
-                let button = TaskButtonView(windowInfo: info, height: height, width: windowWidth, style: style)
-                button.dragDelegate = self
-                button.onActivate = { info in
-                    WindowManager.shared.activateWindow(info)
-                }
-                button.onClose = { info in
-                    WindowManager.shared.closeWindow(info)
-                }
-                button.onMinimize = { info in
-                    WindowManager.shared.minimizeWindow(info)
-                }
-                button.onPinToggle = { info in
-                    PinManager.togglePin(bundleID: info.bundleID)
-                }
-                button.onHideToggle = { info in
-                    HideManager.toggleHidden(bundleID: info.bundleID)
-                }
-                button.onQuit = { info in
-                    NSRunningApplication(processIdentifier: info.pid)?.terminate()
-                }
-                button.onNewWindow = { info in
-                    if let bid = info.bundleID {
-                        PinManager.launch(bundleID: bid)
-                    }
-                }
-                stack.addArrangedSubview(button)
-                let width = button.widthAnchor.constraint(equalToConstant: windowWidth)
-                width.isActive = true
-                windowWidthConstraints.append(width)
-                button.heightAnchor.constraint(equalToConstant: height).isActive = true
+        var ordered: [NSView] = []
+        var liveKeys = Set<String>()
+        for item in newItems {
+            let key = item.slotKey
+            liveKeys.insert(key)
+            let slot: Slot
+            if let existing = slots[key], Self.canReuse(existing.view, for: item, style: style) {
+                slot = existing
+            } else {
+                slots[key]?.view.removeFromSuperview()
+                slot = makeSlot(for: item, style: style, height: height)
+                slots[key] = slot
             }
+            switch item {
+            case .window(let info):
+                (slot.view as? TaskButtonView)?.apply(info)
+            case .pinned(let bundleID), .launching(let bundleID):
+                (slot.view as? PinnedButtonView)?.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
+            }
+            ordered.append(slot.view)
+        }
+        for key in slots.keys where !liveKeys.contains(key) {
+            slots.removeValue(forKey: key)?.view.removeFromSuperview()
+        }
+
+        // Only views that are out of place move, so an unchanged strip doesn't relayout.
+        for (index, view) in ordered.enumerated() {
+            let arranged = tasksStack.arrangedSubviews
+            if index < arranged.count, arranged[index] === view { continue }
+            if arranged.contains(view) {
+                tasksStack.removeArrangedSubview(view)
+            }
+            tasksStack.insertArrangedSubview(view, at: index)
+        }
+
+        items = newItems
+        fitButtons()
+    }
+
+    /// Button style is fixed per view, so a style change needs fresh window buttons;
+    /// closed pins are always square and survive it.
+    private static func canReuse(_ view: NSView, for item: DisplayItem, style: TaskbarButtonStyle) -> Bool {
+        switch item {
+        case .window:
+            return (view as? TaskButtonView)?.style == style
+        case .pinned, .launching:
+            return view is PinnedButtonView
         }
     }
 
-    /// Compact buttons are square. Labeled window buttons share whatever space is
-    /// left after closed pins take a square each; if that slice is too narrow to
-    /// read, windows fall back to squares too.
-    private func windowButtonWidth(
-        windowCount: Int,
-        pinnedCount: Int,
-        style: TaskbarButtonStyle,
-        height: CGFloat
-    ) -> CGFloat {
-        guard style.showsTitle, windowCount > 0 else { return height }
-        let available = availableTaskWidth() - CGFloat(pinnedCount) * height
-        guard available > 0 else { return TaskbarButtonStyle.maxLabeledWidth }
-        let fitted = available / CGFloat(windowCount)
-        if fitted < TaskbarButtonStyle.minLabeledWidth {
-            return height
+    private func makeSlot(for item: DisplayItem, style: TaskbarButtonStyle, height: CGFloat) -> Slot {
+        let view: NSView
+        switch item {
+        case .pinned(let bundleID), .launching(let bundleID):
+            // Closed pins stay square even in Wide mode — only open windows get labels.
+            let pinned = PinnedButtonView(
+                bundleID: bundleID,
+                height: height,
+                width: height,
+                style: .compact
+            )
+            pinned.dragDelegate = self
+            pinned.onLaunch = { PinManager.launch(bundleID: $0) }
+            pinned.onUnpin = { PinManager.togglePin(bundleID: $0) }
+            pinned.onHide = { HideManager.toggleHidden(bundleID: $0) }
+            view = pinned
+        case .window(let info):
+            let button = TaskButtonView(windowInfo: info, height: height, width: height, style: style)
+            button.dragDelegate = self
+            button.onActivate = { info in
+                WindowManager.shared.activateWindow(info)
+            }
+            button.onClose = { info in
+                WindowManager.shared.closeWindow(info)
+            }
+            button.onMinimize = { info in
+                WindowManager.shared.minimizeWindow(info)
+            }
+            button.onPinToggle = { info in
+                PinManager.togglePin(bundleID: info.bundleID)
+            }
+            button.onHideToggle = { info in
+                HideManager.toggleHidden(bundleID: info.bundleID)
+            }
+            button.onQuit = { info in
+                NSRunningApplication(processIdentifier: info.pid)?.terminate()
+            }
+            button.onNewWindow = { info in
+                if let bid = info.bundleID {
+                    PinManager.launch(bundleID: bid)
+                }
+            }
+            view = button
         }
-        return min(fitted, TaskbarButtonStyle.maxLabeledWidth)
+        // Just below required: the stack's containment constraints must win if a
+        // fit is momentarily stale, rather than AppKit breaking one of them.
+        let width = view.widthAnchor.constraint(equalToConstant: height)
+        width.priority = NSLayoutConstraint.Priority(999)
+        width.isActive = true
+        view.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return Slot(view: view, width: width)
+    }
+
+    /// Labeled window buttons share whatever space is left after closed pins take a
+    /// square each. Once that slice is too narrow to read, every button is a
+    /// square, and squares that still don't fit move into the overflow menu.
+    private func fitButtons() {
+        let height = bounds.height > 0 ? bounds.height : TaskbarSettings.shared.barHeight
+        let available = availableTaskWidth()
+        let windowCount = items.filter(\.isWindow).count
+        let pinnedCount = items.count - windowCount
+
+        var windowWidth = height
+        visibleCount = items.count
+        let labeledWidth = windowCount > 0
+            ? (available - CGFloat(pinnedCount) * height) / CGFloat(windowCount)
+            : 0
+        if builtStyle.showsTitle, labeledWidth >= TaskbarButtonStyle.minLabeledWidth {
+            windowWidth = min(labeledWidth, TaskbarButtonStyle.maxLabeledWidth)
+        } else if available > 0, CGFloat(items.count) * height > available {
+            visibleCount = max(Int(((available - overflowButtonWidth) / height).rounded(.down)), 0)
+        }
+
+        for (index, item) in items.enumerated() {
+            guard let slot = slots[item.slotKey] else { continue }
+            let width = item.isWindow ? windowWidth : height
+            if abs(slot.width.constant - width) > 0.5 {
+                slot.width.constant = width
+            }
+            // Hidden arranged views are detached from the stack's layout, so the
+            // overflowed tail takes no space but keeps its place in the order.
+            let overflowed = index >= visibleCount
+            if slot.view.isHidden != overflowed {
+                slot.view.isHidden = overflowed
+            }
+        }
+
+        let overflow = items.dropFirst(visibleCount)
+        overflowButton.isHidden = overflow.isEmpty
+        overflowButton.containsActiveWindow = overflow.contains {
+            if case .window(let info) = $0 { return info.isActive }
+            return false
+        }
+        stackTrailing?.constant = overflow.isEmpty ? -4 : -(4 + overflowButtonWidth)
+        fittedWidth = tasksContainer.bounds.width
     }
 
     private func availableTaskWidth() -> CGFloat {
@@ -246,29 +343,25 @@ final class TaskbarContentView: NSView {
         return max(screenWidth - height - tray.fittingSize.width - 8, 0)
     }
 
-    /// When the icon set/order is unchanged, only refresh active underlines — no layout jump.
-    private func applyInPlaceIfPossible(_ items: [DisplayItem]) -> Bool {
-        guard let stack = tasksStack else { return false }
-        guard builtStyle == TaskbarSettings.shared.buttonStyle else { return false }
-        let views = stack.arrangedSubviews
-        guard views.count == items.count else { return false }
-        for (view, item) in zip(views, items) {
-            switch item {
-            case .pinned(let bundleID), .launching(let bundleID):
-                guard (view as? PinnedButtonView)?.bundleID == bundleID else { return false }
-            case .window(let info):
-                guard (view as? TaskButtonView)?.windowInfo.id == info.id else { return false }
-            }
-        }
-        for (view, item) in zip(views, items) {
+    private func overflowEntries() -> [TaskOverflowButtonView.Entry] {
+        items.dropFirst(visibleCount).map { item in
             switch item {
             case .window(let info):
-                (view as? TaskButtonView)?.apply(info)
+                let icon = NSRunningApplication(processIdentifier: info.pid)?.icon
+                    ?? info.bundleID.flatMap { PinManager.icon(forBundleID: $0) }
+                return TaskOverflowButtonView.Entry(title: info.displayTitle, icon: icon, isActive: info.isActive) {
+                    WindowManager.shared.activateWindow(info)
+                }
             case .pinned(let bundleID), .launching(let bundleID):
-                (view as? PinnedButtonView)?.setLaunching(LaunchTracker.shared.isLaunching(bundleID))
+                return TaskOverflowButtonView.Entry(
+                    title: PinManager.appName(forBundleID: bundleID),
+                    icon: PinManager.icon(forBundleID: bundleID),
+                    isActive: false
+                ) {
+                    PinManager.launch(bundleID: bundleID)
+                }
             }
         }
-        return true
     }
 
     private enum DisplayItem {
@@ -277,6 +370,20 @@ final class TaskbarContentView: NSView {
         /// first window shows up (or the launch times out).
         case launching(String)
         case window(WindowInfo)
+
+        /// Identity of the button that shows this item. A pin's placeholder and its
+        /// "opening" state share one button; its windows get their own.
+        var slotKey: String {
+            switch self {
+            case .pinned(let bundleID), .launching(let bundleID): return "app:" + bundleID
+            case .window(let info): return "window:" + info.id
+            }
+        }
+
+        var isWindow: Bool {
+            if case .window = self { return true }
+            return false
+        }
 
         var orderKey: String {
             switch self {
@@ -365,7 +472,7 @@ final class TaskbarContentView: NSView {
     }
 
     private func persistOrderFromStack() {
-        guard let stack = tasksStack else { return }
+        let stack = tasksStack
         var order: [String] = []
         var seen = Set<String>()
         for view in stack.arrangedSubviews {
@@ -411,7 +518,9 @@ final class TaskbarContentView: NSView {
 
     private func moveIcon(_ view: NSView, in stack: NSStackView, toward event: NSEvent) {
         let point = stack.convert(event.locationInWindow, from: nil)
-        let arranged = stack.arrangedSubviews
+        // Overflowed buttons are hidden at the tail of the stack; dropping past the
+        // last visible icon must not slot the dragged one in behind them.
+        let arranged = stack.arrangedSubviews.filter { !$0.isHidden }
         guard let fromIndex = arranged.firstIndex(of: view) else { return }
 
         var toIndex = arranged.count - 1
@@ -426,14 +535,21 @@ final class TaskbarContentView: NSView {
 
         // Keep the view in the hierarchy — removeFromSuperview mid-drag
         // cancels mouse tracking and leaves the icon stuck grey.
-        // Animate sibling slides so reordering doesn't snap.
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
-            context.allowsImplicitAnimation = true
+        let move = {
             stack.removeArrangedSubview(view)
             stack.insertArrangedSubview(view, at: toIndex)
             stack.layoutSubtreeIfNeeded()
+        }
+        if TaskbarAppearance.reduceMotion {
+            move()
+        } else {
+            // Animate sibling slides so reordering doesn't snap.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+                context.allowsImplicitAnimation = true
+                move()
+            }
         }
         didReorderDuringDrag = true
     }
@@ -470,6 +586,10 @@ final class TaskbarContentView: NSView {
             if didReorder {
                 persistOrderFromStack()
             }
+            // persistOrderFromStack's notification has normally reloaded already.
+            if needsReloadAfterDrag {
+                reload()
+            }
             // Drag (even without a reorder) must not open/activate the icon.
             return
         }
@@ -478,33 +598,10 @@ final class TaskbarContentView: NSView {
 
     override func layout() {
         super.layout()
-        // Rebuild when height known on first layout
-        if tasksContainer.subviews.isEmpty {
-            reload()
-            return
-        }
-        // The first build may have estimated the available width (container not laid
-        // out yet), and the screen can change size — resize labeled buttons to fit.
-        refreshButtonWidths()
-    }
-
-    private func refreshButtonWidths() {
-        guard !isDraggingIcon else { return }
-        let height = bounds.height > 0 ? bounds.height : TaskbarSettings.shared.barHeight
-        for constraint in pinnedWidthConstraints where abs(constraint.constant - height) > 0.5 {
-            constraint.constant = height
-        }
-        guard !windowWidthConstraints.isEmpty else { return }
-        let target = windowButtonWidth(
-            windowCount: windowWidthConstraints.count,
-            pinnedCount: pinnedWidthConstraints.count,
-            style: builtStyle,
-            height: height
-        )
-        guard let first = windowWidthConstraints.first, abs(first.constant - target) > 0.5 else { return }
-        for constraint in windowWidthConstraints {
-            constraint.constant = target
-        }
+        // The first fit runs before the container has a width (it estimates from the
+        // screen), and screens change size — refit once the real width differs.
+        guard !isDraggingIcon, abs(tasksContainer.bounds.width - fittedWidth) > 0.5 else { return }
+        fitButtons()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -548,11 +645,150 @@ extension TaskbarContentView: TaskbarIconDragDelegate {
             NSCursor.closedHand.set()
             beginDragMouseUpMonitor(for: view)
         }
-        guard let stack = tasksStack else { return }
-        moveIcon(view, in: stack, toward: event)
+        moveIcon(view, in: tasksStack, toward: event)
     }
 
     func taskbarIconMouseUp(_ view: NSView, event: NSEvent) {
         finishIconDrag(view, event: event)
+    }
+}
+
+/// Windows-style "»" at the end of a full strip, listing the buttons that didn't fit.
+private final class TaskOverflowButtonView: NSView {
+    struct Entry {
+        let title: String
+        let icon: NSImage?
+        let isActive: Bool
+        let perform: () -> Void
+    }
+
+    /// Asked at click time, so the menu reflects the strip as it is now.
+    var entriesProvider: (() -> [Entry])?
+
+    /// Shows the active-window accent here when the focused window is one of the
+    /// hidden ones, so the bar never looks like nothing has focus.
+    var containsActiveWindow = false {
+        didSet { refreshAppearance() }
+    }
+
+    private let chevron = NSImageView()
+    private let underline = NSView()
+    private var tracking: NSTrackingArea?
+    private var isHovered = false
+    private var shownEntries: [Entry] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        toolTip = "More windows"
+
+        chevron.image = NSImage(systemSymbolName: "chevron.right.2", accessibilityDescription: nil)
+        chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        chevron.contentTintColor = .labelColor
+        chevron.setAccessibilityElement(false)
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(chevron)
+
+        underline.wantsLayer = true
+        underline.layer?.cornerRadius = 1
+        underline.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(underline)
+
+        NSLayoutConstraint.activate([
+            chevron.centerXAnchor.constraint(equalTo: centerXAnchor),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            underline.leadingAnchor.constraint(equalTo: leadingAnchor),
+            underline.trailingAnchor.constraint(equalTo: trailingAnchor),
+            underline.bottomAnchor.constraint(equalTo: bottomAnchor),
+            underline.heightAnchor.constraint(equalToConstant: 4)
+        ])
+        refreshAppearance()
+        TaskbarAppearance.addObserver(self, selector: #selector(refreshAppearance))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func refreshAppearance() {
+        underline.isHidden = !containsActiveWindow
+        underline.layer?.backgroundColor = resolvedCGColor(.controlAccentColor)
+        layer?.backgroundColor = isHovered
+            ? NSColor.white.withAlphaComponent(0.12).cgColor
+            : NSColor.clear.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        refreshAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        refreshAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        showMenu(with: event)
+    }
+
+    private func showMenu(with event: NSEvent?) {
+        let entries = entriesProvider?() ?? []
+        guard !entries.isEmpty else { return }
+        shownEntries = entries
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (index, entry) in entries.enumerated() {
+            let title = entry.title.count > 60 ? String(entry.title.prefix(59)) + "…" : entry.title
+            let item = NSMenuItem(title: title, action: #selector(choose(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = entry.isActive ? .on : .off
+            if let icon = entry.icon?.copy() as? NSImage {
+                icon.size = NSSize(width: 16, height: 16)
+                item.image = icon
+            }
+            menu.addItem(item)
+        }
+        popUpTaskbarIconMenu(menu, with: event, in: self)
+    }
+
+    @objc private func choose(_ sender: NSMenuItem) {
+        guard shownEntries.indices.contains(sender.tag) else { return }
+        shownEntries[sender.tag].perform()
+    }
+
+    // MARK: - Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { "More windows" }
+
+    override func accessibilityPerformPress() -> Bool {
+        showMenu(with: nil)
+        return true
+    }
+
+    override func accessibilityPerformShowMenu() -> Bool {
+        showMenu(with: nil)
+        return true
     }
 }

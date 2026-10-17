@@ -4,6 +4,7 @@ import AppKit
 /// taskbar can show an "opening" indicator during the dead time between click and
 /// first window. Windows shows a spinner on the icon here; without it a cold app
 /// launch looks like the click did nothing.
+@MainActor
 final class LaunchTracker {
     static let shared = LaunchTracker()
 
@@ -21,11 +22,14 @@ final class LaunchTracker {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                       let bundleID = app.bundleIdentifier else { return }
-                if name == NSWorkspace.didTerminateApplicationNotification {
-                    self?.finish(bundleID: bundleID)
-                } else {
-                    // Activated with a window on screen means the launch landed.
-                    self?.finishIfWindowVisible(bundleID: bundleID)
+                // Delivered on the main queue (queue: .main above).
+                MainActor.assumeIsolated {
+                    if name == NSWorkspace.didTerminateApplicationNotification {
+                        self?.finish(bundleID: bundleID)
+                    } else {
+                        // Activated with a window on screen means the launch landed.
+                        self?.finishIfWindowVisible(bundleID: bundleID)
+                    }
                 }
             }
             observers.append(token)
