@@ -13,10 +13,13 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Hover window previews with a close button; thumbnails when Screen Recording is granted (title cards otherwise, and on macOS 13)
 - Dock badges (unread counts) on task buttons, and "Not responding" apps dimmed like on Windows
 - Center or left-aligned icons
-- Start menu with pinned apps and type-to-search across installed apps (configurable Start hotkey; default Windows / ⌘ alone unhides the taskbar)
+- Buttons that don't fit go into an overflow (») menu instead of sliding under the tray
+- Start menu with pinned apps and ranked type-to-search across installed apps (arrows/Enter, ⌘Enter reveals in Finder, right-click to pin/unpin or quit), plus a power menu (Lock, Log Out, Sleep, Restart, Shut Down). Configurable Start hotkey; default Windows / ⌘ tapped alone
+- Downloads flyout: newest at the bottom, live progress for downloads in flight, search, sort, Space for Quick Look, right-click (Open With, Copy, Show in Finder, Move to Trash)
+- Trash flyout: Put Back to the original folder, Delete Immediately, Empty Trash
 - Clock, tray, Show Desktop
 - Clock flyout shows Up Next: your next events for the coming week, like the Calendar widget (click one to open it in Calendar)
-- Right-click: Close, Minimize, Pin, Hide, New window, Quit
+- Right-click a task button: Close, Minimize, Pin, Hide, New window, Quit
 - Middle-click closes a window
 - Optional Dock replacement (Dock fully hidden while running; restored on quit)
 - Optional auto-hide taskbar
@@ -76,15 +79,21 @@ After a rebuild, macOS may keep the Accessibility toggle on but stop trusting th
 
 Automation permission may also be requested the first time the app raises or minimizes scriptable windows (e.g. Chrome).
 
+Optional:
+
+- **Calendar** — asked the first time you open the clock flyout; powers Up Next.
+- **Screen Recording** — only for window thumbnails in hover previews (Settings → Permissions → Grant…). Quit and reopen the app after granting.
+- **Full Disk Access** — lets the Trash flyout list `~/.Trash`.
+
 ## Settings
 
 Menu bar icon → **Settings…**, or Start → Settings:
 
 - Center taskbar icons
 - Taskbar buttons: **Compact** (icons only) or **Wide** (icons with window titles, like Windows 10/11)
-- Show window previews on hover. Thumbnails need **Screen Recording** (Settings → Permissions → Grant…); the app never asks for it on its own
+- Show window previews on hover, and the **Preview delay** before they open (it starts once an auto-hidden bar has finished revealing). Thumbnails need **Screen Recording**; the app never asks for it on its own
 - Hide Dock (use taskbar instead)
-- Automatically hide the taskbar
+- Automatically hide the taskbar, with **Reveal zone** (how close to the edge the pointer must get), **Hide delay**, and **Reveal speed** (0–0.18 s; 0 shows it instantly)
 - Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.
 - Launch at login (shows when it still needs approval in System Settings → Login Items)
 - Reset to defaults
