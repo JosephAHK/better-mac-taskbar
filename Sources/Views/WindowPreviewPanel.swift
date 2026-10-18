@@ -26,6 +26,8 @@ final class WindowPreviewController {
     private var showTimer: Timer?
     private var hideTimer: Timer?
     private var refreshTimer: Timer?
+    /// Last capture per window, kept after the flyout closes so the next hover shows
+    /// an image at once (refreshed in place) instead of an icon card it pops into.
     private var thumbnails: [CGWindowID: NSImage] = [:]
     private var capturesInFlight: Set<CGWindowID> = []
     /// Tracked on its own rather than read off the panel's visibility, so the
@@ -127,7 +129,8 @@ final class WindowPreviewController {
         refreshTimer?.invalidate()
         refreshTimer = nil
         anchor = nil
-        thumbnails.removeAll()
+        let liveIDs = Set(WindowManager.shared.windows.compactMap(\.cgWindowID))
+        thumbnails = thumbnails.filter { liveIDs.contains($0.key) }
         panel?.orderOut(nil)
         if holdsBar {
             holdsBar = false
@@ -142,6 +145,8 @@ final class WindowPreviewController {
     private func scheduleShow(for button: TaskButtonView) {
         cancelShow()
         guard let barWindow = button.window, TaskbarPanelController.shared.isSettled(barWindow) else { return }
+        // Capture during the delay, so the image is usually there when the card opens.
+        capture(button.windowInfo, scale: barWindow.backingScaleFactor)
         let delay = TaskbarSettings.shared.windowPreviewDelay
         if delay <= 0 {
             show(for: button)
@@ -230,12 +235,9 @@ final class WindowPreviewController {
             TaskbarPanelController.shared.beginKeepVisible()
         }
         if !panel.isVisible {
-            panel.alphaValue = 0
+            // No fade: the delay before showing is the user's to set, and a fade on top
+            // of it reads as lag.
             panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                panel.animator().alphaValue = 1
-            }
             AppLog.debug("window preview shown", ["thumbnails": showsThumbnails])
         }
 
@@ -279,31 +281,34 @@ final class WindowPreviewController {
 
     // MARK: - Thumbnails
 
+    /// Refresh tick for the open card.
     private func captureThumbnails() {
-        guard #available(macOS 14.0, *), let panel, WindowThumbnails.isAvailable,
-              let windowID = anchor?.windowInfo.cgWindowID,
+        guard let panel, let info = anchor?.windowInfo else { return }
+        capture(info, scale: panel.backingScaleFactor)
+    }
+
+    private func capture(_ info: WindowInfo, scale: CGFloat) {
+        guard #available(macOS 14.0, *), WindowThumbnails.isAvailable,
+              let windowID = info.cgWindowID,
               capturesInFlight.insert(windowID).inserted else { return }
-        let scale = panel.backingScaleFactor
-        let thumbnailSize = panel.preview.thumbnailSize
+        let size = WindowPreviewView.thumbnailSize(for: info)
         Task {
-            let image = await WindowThumbnailer.shared.image(
-                of: windowID,
-                fitting: thumbnailSize,
-                scale: scale
-            )
+            let image = await WindowThumbnailer.shared.image(of: windowID, fitting: size, scale: scale)
             self.thumbnailArrived(image, for: windowID, scale: scale)
         }
     }
 
     private func thumbnailArrived(_ image: CGImage?, for windowID: CGWindowID, scale: CGFloat) {
         capturesInFlight.remove(windowID)
-        // Captures finish after the flyout moved on or closed; those are dropped.
-        guard let image, isVisible, anchor?.windowInfo.cgWindowID == windowID else { return }
+        guard let image else { return }
         let thumbnail = NSImage(
             cgImage: image,
             size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
         )
+        // Cached even when it lands after the flyout moved on or closed: a capture
+        // started during the show delay is meant for the card about to open.
         thumbnails[windowID] = thumbnail
+        guard isVisible, anchor?.windowInfo.cgWindowID == windowID else { return }
         panel?.preview.setThumbnail(thumbnail, for: windowID)
     }
 }

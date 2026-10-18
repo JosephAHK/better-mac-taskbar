@@ -27,10 +27,13 @@ actor WindowThumbnailer {
 
     private var content: SCShareableContent?
     private var contentFetchedAt = Date.distantPast
-    /// Listing shareable content walks every window on the system and takes tens of
-    /// milliseconds, so one listing serves every capture for a short while. A window
-    /// opened since then just waits for the next listing.
-    private let contentLifetime: TimeInterval = 2
+    /// Listing shareable content walks every window on the system (~40ms with a
+    /// hundred-odd windows), so one listing serves every capture for a while. A
+    /// window missing from it — opened since — triggers a fresh listing at once.
+    private let contentLifetime: TimeInterval = 10
+    /// Floor between listings, so a window that never shows up in one (some can't be
+    /// captured at all) doesn't relist on every refresh.
+    private let minimumRelistInterval: TimeInterval = 1
     /// Windows whose capture has already failed once, so a window that can never be
     /// captured logs once rather than on every refresh.
     private var loggedFailures: Set<CGWindowID> = []
@@ -67,18 +70,21 @@ actor WindowThumbnailer {
     }
 
     private func window(withID windowID: CGWindowID) async -> SCWindow? {
-        if Date().timeIntervalSince(contentFetchedAt) >= contentLifetime || content == nil {
-            do {
-                content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
-                contentFetchedAt = Date()
-                loggedContentFailure = false
-            } catch {
-                if !loggedContentFailure {
-                    loggedContentFailure = true
-                    AppLog.warn("shareable content unavailable", ["error": error.localizedDescription])
-                }
-                return nil
+        let age = Date().timeIntervalSince(contentFetchedAt)
+        if age < contentLifetime, let window = content?.windows.first(where: { $0.windowID == windowID }) {
+            return window
+        }
+        guard age >= minimumRelistInterval || content == nil else { return nil }
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+            contentFetchedAt = Date()
+            loggedContentFailure = false
+        } catch {
+            if !loggedContentFailure {
+                loggedContentFailure = true
+                AppLog.warn("shareable content unavailable", ["error": error.localizedDescription])
             }
+            return nil
         }
         return content?.windows.first { $0.windowID == windowID }
     }
