@@ -9,17 +9,17 @@ private func BMTCGSSetSymbolicHotKeyEnabled(_ hotKey: Int32, _ enabled: Bool) ->
 /// Symbolic hotkey ids for the native app switcher: ⌘Tab and ⌘⇧Tab. ⌘` is left alone.
 private let nativeSwitcherHotKeys: [Int32] = [1, 2]
 
-/// Drives the window switcher from ⌘Tab through a session event tap.
+/// Drives the window switcher from its shortcut (⌘Tab unless changed) through a
+/// session event tap.
 ///
-/// The native switcher is off exactly while the tap is installed, so a missing
-/// Accessibility grant, a failed tap or the setting being off always leaves the
-/// system ⌘Tab working.
+/// The native switcher is off only while the tap is installed and the shortcut is
+/// ⌘Tab, so a missing Accessibility grant, a failed tap, the setting being off or
+/// a different shortcut always leaves the system ⌘Tab working.
 @MainActor
 final class WindowSwitcherHotkey {
     static let shared = WindowSwitcherHotkey()
 
     private enum KeyCode {
-        static let tab: Int64 = 48
         static let escape: Int64 = 53
         static let left: Int64 = 123
         static let right: Int64 = 124
@@ -27,6 +27,10 @@ final class WindowSwitcherHotkey {
         static let up: Int64 = 126
     }
 
+    private var shortcut = TaskbarSettings.shared.windowSwitcherShortcut
+    /// Settings is recording a new shortcut: every key passes through to it, and the
+    /// native switcher is off so ⌘Tab can be recorded too.
+    private var isRecording = false
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var isStarted = false
@@ -38,10 +42,10 @@ final class WindowSwitcherHotkey {
     /// Secure input (a password field) hides key events from taps, so ⌘Tab would do
     /// nothing at all; the native switcher stands in while it is on.
     private var secureInputFallback = false
-    /// Runs only while ⌘ is held: secure input can switch on mid-hold, and a missed
-    /// ⌘ release would leave the switcher open.
-    private var commandHeldTimer: Timer?
-    private var commandHeld = false
+    /// Runs only while the shortcut's modifiers are held: secure input can switch on
+    /// mid-hold, and a missed release would leave the switcher open.
+    private var modifiersHeldTimer: Timer?
+    private var modifiersHeld = false
     /// Key-downs the switcher consumed; their key-ups are consumed too, so the app
     /// underneath never sees half a key press.
     private var swallowedKeys: Set<Int64> = []
@@ -57,11 +61,30 @@ final class WindowSwitcherHotkey {
 
     func start() {
         isStarted = true
+        let shortcut = TaskbarSettings.shared.windowSwitcherShortcut
+        if shortcut != self.shortcut {
+            self.shortcut = shortcut
+            endModifierHold()
+            WindowSwitcherController.shared.cancel()
+            AppLog.info("window switcher shortcut", ["shortcut": shortcut.displayString])
+        }
         if TaskbarSettings.shared.replaceCommandTab {
             installTap()
         } else {
             removeTap()
         }
+        updateNativeSwitcher()
+    }
+
+    /// Called by the Settings recorder around recording a switcher shortcut.
+    func setRecording(_ recording: Bool) {
+        guard recording != isRecording else { return }
+        isRecording = recording
+        if recording {
+            endModifierHold()
+            WindowSwitcherController.shared.cancel()
+        }
+        updateNativeSwitcher()
     }
 
     func stop() {
@@ -74,7 +97,7 @@ final class WindowSwitcherHotkey {
     private func installTap() {
         guard tap == nil else { return }
         guard AccessibilityService.isTrusted(prompt: false) else {
-            setNativeSwitcherEnabled(true)
+            updateNativeSwitcher()
             scheduleTrustRetry()
             return
         }
@@ -93,7 +116,7 @@ final class WindowSwitcherHotkey {
                 loggedTapFailure = true
                 AppLog.warn("window switcher event tap unavailable")
             }
-            setNativeSwitcherEnabled(true)
+            updateNativeSwitcher()
             scheduleTrustRetry()
             return
         }
@@ -106,14 +129,14 @@ final class WindowSwitcherHotkey {
         tapSource = source
         loggedTapFailure = false
         secureInputFallback = false
-        setNativeSwitcherEnabled(false)
-        AppLog.info("window switcher on")
+        updateNativeSwitcher()
+        AppLog.info("window switcher on", ["shortcut": shortcut.displayString])
     }
 
     private func removeTap() {
         trustRetryTimer?.invalidate()
         trustRetryTimer = nil
-        endCommandHold()
+        endModifierHold()
         WindowSwitcherController.shared.cancel()
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
@@ -127,7 +150,7 @@ final class WindowSwitcherHotkey {
         tapSource = nil
         swallowedKeys.removeAll()
         // Also covers a crash that left the native switcher disabled.
-        setNativeSwitcherEnabled(true)
+        updateNativeSwitcher()
     }
 
     private func scheduleTrustRetry() {
@@ -143,6 +166,11 @@ final class WindowSwitcherHotkey {
         }
         RunLoop.main.add(timer, forMode: .common)
         trustRetryTimer = timer
+    }
+
+    private func updateNativeSwitcher() {
+        let replaced = tap != nil && shortcut.isCommandTab && !secureInputFallback
+        setNativeSwitcherEnabled(!(replaced || isRecording))
     }
 
     private func setNativeSwitcherEnabled(_ enabled: Bool) {
@@ -176,58 +204,74 @@ final class WindowSwitcherHotkey {
         }
     }
 
+    /// The shortcut's modifiers as event-tap flags.
+    private var holdFlags: CGEventFlags {
+        let mods = shortcut.nsModifierFlags
+        var flags: CGEventFlags = []
+        if mods.contains(.command) { flags.insert(.maskCommand) }
+        if mods.contains(.option) { flags.insert(.maskAlternate) }
+        if mods.contains(.control) { flags.insert(.maskControl) }
+        return flags
+    }
+
+    /// Letting go of any one of the shortcut's modifiers ends the hold.
+    private func holdsModifiers(_ flags: CGEventFlags) -> Bool {
+        flags.contains(holdFlags)
+    }
+
     private func handleFlagsChanged(_ flags: CGEventFlags) {
-        let held = flags.contains(.maskCommand)
-        if held, !commandHeld {
-            commandHeld = true
+        let held = holdsModifiers(flags)
+        if held, !modifiersHeld {
+            modifiersHeld = true
             updateSecureInputFallback()
             let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                 // Added to the main run loop below.
-                MainActor.assumeIsolated { self?.commandHeldTick() }
+                MainActor.assumeIsolated { self?.modifiersHeldTick() }
             }
             RunLoop.main.add(timer, forMode: .common)
-            commandHeldTimer = timer
-        } else if !held, commandHeld {
-            endCommandHold()
+            modifiersHeldTimer = timer
+        } else if !held, modifiersHeld {
+            endModifierHold()
             WindowSwitcherController.shared.commit()
         }
     }
 
-    private func commandHeldTick() {
+    private func modifiersHeldTick() {
         updateSecureInputFallback()
         // flagsChanged can be lost (the tap was briefly off, or secure input ate it).
-        if !CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand) {
-            endCommandHold()
+        if !holdsModifiers(CGEventSource.flagsState(.combinedSessionState)) {
+            endModifierHold()
             WindowSwitcherController.shared.commit()
         }
     }
 
-    private func endCommandHold() {
-        commandHeld = false
-        commandHeldTimer?.invalidate()
-        commandHeldTimer = nil
+    private func endModifierHold() {
+        modifiersHeld = false
+        modifiersHeldTimer?.invalidate()
+        modifiersHeldTimer = nil
     }
 
     private func updateSecureInputFallback() {
         let secure = IsSecureEventInputEnabled()
         guard secure != secureInputFallback else { return }
         secureInputFallback = secure
-        setNativeSwitcherEnabled(secure)
+        updateNativeSwitcher()
     }
 
     private func handleKeyDown(_ event: CGEvent) -> Bool {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
         let switcher = WindowSwitcherController.shared
-        let command = flags.contains(.maskCommand)
         let shift = flags.contains(.maskShift)
+        let trigger = Int64(shortcut.keyCode)
 
         if !switcher.isEngaged {
-            guard keyCode == KeyCode.tab, command, !secureInputFallback,
-                  !StartHotkeyMonitor.shared.isSuspended,
-                  !flags.contains(.maskControl), !flags.contains(.maskAlternate) else { return false }
-            if !commandHeld {
-                // The ⌘ press itself was missed (the tap came up while it was held).
+            // Exactly the shortcut's modifiers (⇧ aside): ⌘⌥Tab is not ⌘Tab.
+            let held = flags.intersection([.maskCommand, .maskAlternate, .maskControl])
+            guard keyCode == trigger, held == holdFlags, !secureInputFallback, !isRecording,
+                  !StartHotkeyMonitor.shared.isSuspended else { return false }
+            if !modifiersHeld {
+                // The modifier press itself was missed (the tap came up while it was held).
                 handleFlagsChanged(flags)
             }
             switcher.open(reverse: shift)
@@ -235,14 +279,14 @@ final class WindowSwitcherHotkey {
             return true
         }
 
-        guard command else {
-            // ⌘ is up but its release never arrived; the state can't be trusted.
-            endCommandHold()
+        guard holdsModifiers(flags) else {
+            // A modifier is up but its release never arrived; the state can't be trusted.
+            endModifierHold()
             switcher.cancel()
             return false
         }
         switch keyCode {
-        case KeyCode.tab: switcher.step(shift ? -1 : 1)
+        case trigger: switcher.step(shift ? -1 : 1)
         case KeyCode.left: switcher.step(-1)
         case KeyCode.right: switcher.step(1)
         case KeyCode.up: switcher.moveVertically(up: true)

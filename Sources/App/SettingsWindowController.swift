@@ -8,8 +8,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let hosting = NSHostingController(rootView: SettingsRootView())
         let window = NSWindow(contentViewController: hosting)
         window.title = "Better Mac Taskbar Settings"
+        // Not `titlebarAppearsTransparent`: it strips the toolbar's scroll-edge
+        // background, so scrolled cards draw straight through the page title.
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.setContentSize(NSSize(width: 760, height: 520))
         window.center()

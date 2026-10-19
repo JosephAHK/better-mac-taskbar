@@ -96,7 +96,8 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar, with **Reveal zone** (how close to the edge the pointer must get), **Hide delay**, and **Reveal speed** (0–0.18 s; 0 shows it instantly)
 - Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.
-- Replace ⌘Tab with window switcher (on by default; off restores the macOS app switcher)
+- Window switcher (on by default; off restores the macOS app switcher), with a recordable **Shortcut** — hold ⌘, ⌥ or ⌃ and press a key; ⌘Tab replaces the macOS app switcher, anything else runs alongside it
+- Window switcher look (Appearance page): **Theme** (Dark / Light / Match system), **Thumbnail size**, **Background opacity**, **Show window titles**
 - Launch at login (shows when it still needs approval in System Settings → Login Items)
 - Reset to defaults
 

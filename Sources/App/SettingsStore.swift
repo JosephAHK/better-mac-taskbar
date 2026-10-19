@@ -143,11 +143,60 @@ final class SettingsStore: ObservableObject {
     @Published var replaceCommandTab: Bool {
         didSet {
             guard replaceCommandTab != TaskbarSettings.shared.replaceCommandTab else { return }
+            if !replaceCommandTab {
+                HotkeyRecorder.shared.cancel()
+            }
             TaskbarSettings.shared.replaceCommandTab = replaceCommandTab
         }
     }
 
     @Published private(set) var hotkeyDisplay: String
+    @Published private(set) var switcherShortcutDisplay: String
+    @Published private(set) var switcherShortcutIsDefault: Bool
+
+    @Published var switcherTheme: WindowSwitcherTheme {
+        didSet {
+            guard switcherTheme != TaskbarSettings.shared.windowSwitcherTheme else { return }
+            TaskbarSettings.shared.windowSwitcherTheme = switcherTheme
+        }
+    }
+
+    @Published var switcherThumbnailHeight: Double {
+        didSet {
+            // Snap to 10 pt without Slider.step, which draws macOS tick marks.
+            let snapped = (switcherThumbnailHeight / 10).rounded() * 10
+            let clamped = min(max(snapped, TaskbarSettings.switcherThumbnailHeightRange.lowerBound),
+                              TaskbarSettings.switcherThumbnailHeightRange.upperBound)
+            if abs(switcherThumbnailHeight - clamped) > 0.0001 {
+                switcherThumbnailHeight = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.windowSwitcherThumbnailHeight) > 0.5 else { return }
+            TaskbarSettings.shared.windowSwitcherThumbnailHeight = clamped
+        }
+    }
+
+    @Published var switcherBackgroundOpacity: Double {
+        didSet {
+            // Snap to 5%.
+            let snapped = (switcherBackgroundOpacity * 20).rounded() / 20
+            let clamped = min(max(snapped, TaskbarSettings.switcherBackgroundOpacityRange.lowerBound),
+                              TaskbarSettings.switcherBackgroundOpacityRange.upperBound)
+            if abs(switcherBackgroundOpacity - clamped) > 0.0001 {
+                switcherBackgroundOpacity = clamped
+                return
+            }
+            guard abs(clamped - TaskbarSettings.shared.windowSwitcherBackgroundOpacity) > 0.001 else { return }
+            TaskbarSettings.shared.windowSwitcherBackgroundOpacity = clamped
+        }
+    }
+
+    @Published var switcherShowTitles: Bool {
+        didSet {
+            guard switcherShowTitles != TaskbarSettings.shared.windowSwitcherShowTitles else { return }
+            TaskbarSettings.shared.windowSwitcherShowTitles = switcherShowTitles
+        }
+    }
     @Published private(set) var hiddenApps: [HiddenApp] = []
     @Published private(set) var accessibilityTrusted: Bool
     /// Screen Recording, which window preview thumbnails need. Only ever preflighted
@@ -191,6 +240,12 @@ final class SettingsStore: ObservableObject {
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
         replaceCommandTab = TaskbarSettings.shared.replaceCommandTab
+        switcherShortcutDisplay = TaskbarSettings.shared.windowSwitcherShortcut.displayString
+        switcherShortcutIsDefault = TaskbarSettings.shared.windowSwitcherShortcut == .default
+        switcherTheme = TaskbarSettings.shared.windowSwitcherTheme
+        switcherThumbnailHeight = TaskbarSettings.shared.windowSwitcherThumbnailHeight
+        switcherBackgroundOpacity = TaskbarSettings.shared.windowSwitcherBackgroundOpacity
+        switcherShowTitles = TaskbarSettings.shared.windowSwitcherShowTitles
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
 
@@ -205,6 +260,11 @@ final class SettingsStore: ObservableObject {
             forName: .startMenuHotkeyChanged, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.reloadHotkey() }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .windowSwitcherSettingChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadSwitcherShortcut() }
         })
 
         reloadHiddenApps()
@@ -225,8 +285,13 @@ final class SettingsStore: ObservableObject {
         showWindowPreviews = TaskbarSettings.shared.showWindowPreviews
         windowPreviewDelay = TaskbarSettings.shared.windowPreviewDelay
         previewThumbnailWidth = TaskbarSettings.shared.previewThumbnailWidth
+        switcherTheme = TaskbarSettings.shared.windowSwitcherTheme
+        switcherThumbnailHeight = TaskbarSettings.shared.windowSwitcherThumbnailHeight
+        switcherBackgroundOpacity = TaskbarSettings.shared.windowSwitcherBackgroundOpacity
+        switcherShowTitles = TaskbarSettings.shared.windowSwitcherShowTitles
         reloadHiddenApps()
         reloadHotkey()
+        reloadSwitcherShortcut()
     }
 
     /// State owned by System Settings, which the user may have just changed there.
@@ -278,6 +343,11 @@ final class SettingsStore: ObservableObject {
     func resetHotkey() {
         HotkeyRecorder.shared.cancel()
         TaskbarSettings.shared.startMenuHotkey = .default
+    }
+
+    func resetSwitcherShortcut() {
+        HotkeyRecorder.shared.cancel()
+        TaskbarSettings.shared.windowSwitcherShortcut = .default
     }
 
     func openLoginItemsSettings() {
@@ -344,6 +414,13 @@ final class SettingsStore: ObservableObject {
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
     }
 
+    private func reloadSwitcherShortcut() {
+        replaceCommandTab = TaskbarSettings.shared.replaceCommandTab
+        let shortcut = TaskbarSettings.shared.windowSwitcherShortcut
+        switcherShortcutDisplay = shortcut.displayString
+        switcherShortcutIsDefault = shortcut == .default
+    }
+
     private func reloadHiddenApps() {
         hiddenApps = TaskbarSettings.shared.hiddenBundleIDs.map { bundleID in
             HiddenApp(
@@ -355,15 +432,30 @@ final class SettingsStore: ObservableObject {
     }
 }
 
-/// Captures the next key combination — or a lone modifier — for the Start menu shortcut.
+/// Captures the next key combination for the Start menu shortcut (a lone modifier
+/// too) or the window switcher shortcut.
 @MainActor
 final class HotkeyRecorder: ObservableObject {
     static let shared = HotkeyRecorder()
 
-    @Published private(set) var isRecording = false
+    enum Target {
+        case startMenu
+        case windowSwitcher
+    }
+
+    /// What is being recorded, or nil when idle.
+    @Published private(set) var target: Target?
     /// Set when the last key pressed while recording was refused; recording
     /// continues so the user can simply try another combination.
     @Published private(set) var rejectionHint: String?
+
+    var isRecording: Bool { target != nil }
+
+    func isRecording(_ target: Target) -> Bool { self.target == target }
+
+    func rejectionHint(for target: Target) -> String? {
+        self.target == target ? rejectionHint : nil
+    }
 
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
@@ -372,16 +464,21 @@ final class HotkeyRecorder: ObservableObject {
 
     private init() {}
 
-    func toggle() {
-        isRecording ? cancel() : start()
+    func toggle(_ target: Target) {
+        let wasRecording = isRecording(target)
+        cancel()
+        if !wasRecording { start(target) }
     }
 
-    func start() {
+    func start(_ target: Target) {
         guard !isRecording else { return }
-        isRecording = true
+        self.target = target
         modifierKeyCode = nil
         sawNonModifier = false
         StartHotkeyMonitor.shared.isSuspended = true
+        if target == .windowSwitcher {
+            WindowSwitcherHotkey.shared.setRecording(true)
+        }
 
         // Local monitors are always called on the main thread.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -409,6 +506,15 @@ final class HotkeyRecorder: ObservableObject {
         }
 
         sawNonModifier = true
+        if target == .windowSwitcher {
+            let mods = event.modifierFlags.intersection(WindowSwitcherShortcut.holdModifiers)
+            guard !mods.isEmpty else {
+                rejectionHint = "Hold ⌘, ⌥ or ⌃ with the key — letting go of it is what switches."
+                return nil
+            }
+            finish(WindowSwitcherShortcut(keyCode: event.keyCode, modifierFlags: mods.rawValue))
+            return nil
+        }
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
         guard StartMenuHotkey.isAcceptableChord(keyCode: event.keyCode, modifierFlags: mods) else {
             rejectionHint = "Add ⌘, ⌥ or ⌃ — on its own, that key would stop typing in every app."
@@ -420,7 +526,9 @@ final class HotkeyRecorder: ObservableObject {
 
     private func handleFlagsChanged(_ event: NSEvent) -> NSEvent? {
         guard isRecording else { return event }
-        guard let flag = StartMenuHotkey.modifierFlag(forKeyCode: event.keyCode) else { return nil }
+        // The switcher shortcut needs a key to press while the modifier is held.
+        guard target == .startMenu,
+              let flag = StartMenuHotkey.modifierFlag(forKeyCode: event.keyCode) else { return nil }
 
         if event.modifierFlags.contains(flag) {
             modifierKeyCode = event.keyCode
@@ -443,6 +551,12 @@ final class HotkeyRecorder: ObservableObject {
         AppLog.info("startMenuHotkey set", ["hotkey": hotkey.displayString])
     }
 
+    private func finish(_ shortcut: WindowSwitcherShortcut) {
+        // Back to normal first, so the tap re-arms with the new shortcut.
+        teardown()
+        TaskbarSettings.shared.windowSwitcherShortcut = shortcut
+    }
+
     private func teardown() {
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
@@ -452,10 +566,14 @@ final class HotkeyRecorder: ObservableObject {
             NSEvent.removeMonitor(flagsMonitor)
             self.flagsMonitor = nil
         }
-        isRecording = false
+        let wasSwitcher = target == .windowSwitcher
+        target = nil
         rejectionHint = nil
         modifierKeyCode = nil
         sawNonModifier = false
         StartHotkeyMonitor.shared.isSuspended = false
+        if wasSwitcher {
+            WindowSwitcherHotkey.shared.setRecording(false)
+        }
     }
 }

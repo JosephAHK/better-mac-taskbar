@@ -434,6 +434,67 @@ private struct AppearancePage: View {
                     }
                 }
             }
+
+            Card(
+                title: "Window switcher",
+                footer: "Changes show the next time the switcher opens."
+            ) {
+                Row(title: "Theme") {
+                    Picker("", selection: $store.switcherTheme) {
+                        ForEach(WindowSwitcherTheme.allCases, id: \.self) { theme in
+                            Text(theme.displayName).tag(theme)
+                        }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 190)
+                }
+                Row(
+                    title: "Thumbnail size",
+                    subtitle: "Height of each window image. The switcher still shrinks to fit when many windows are open."
+                ) {
+                    let range = TaskbarSettings.switcherThumbnailHeightRange
+                    AutoHideSliderControl(
+                        valueLabel: "\(Int(store.switcherThumbnailHeight)) pt",
+                        isDefault: abs(store.switcherThumbnailHeight - TaskbarSettings.switcherThumbnailHeightDefault) < 0.5,
+                        onReset: {
+                            store.switcherThumbnailHeight = TaskbarSettings.switcherThumbnailHeightDefault
+                        }
+                    ) {
+                        SettingsSlider(
+                            value: $store.switcherThumbnailHeight,
+                            range: range.lowerBound...range.upperBound,
+                            tickMarks: 5
+                        )
+                    }
+                }
+                Row(
+                    title: "Background opacity",
+                    subtitle: "How solid the panel is. 0% shows only the blur of what's behind it."
+                ) {
+                    let range = TaskbarSettings.switcherBackgroundOpacityRange
+                    AutoHideSliderControl(
+                        valueLabel: "\(Int((store.switcherBackgroundOpacity * 100).rounded()))%",
+                        isDefault: abs(store.switcherBackgroundOpacity - TaskbarSettings.switcherBackgroundOpacityDefault) < 0.001,
+                        onReset: {
+                            store.switcherBackgroundOpacity = TaskbarSettings.switcherBackgroundOpacityDefault
+                        }
+                    ) {
+                        SettingsSlider(
+                            value: $store.switcherBackgroundOpacity,
+                            range: range.lowerBound...range.upperBound,
+                            tickMarks: 4
+                        )
+                    }
+                }
+                Row(
+                    title: "Show window titles",
+                    subtitle: "A title under each thumbnail.",
+                    isLast: true
+                ) {
+                    Toggle("", isOn: $store.switcherShowTitles).settingsToggle()
+                }
+            }
         }
     }
 
@@ -521,14 +582,15 @@ private struct ShortcutsPage: View {
                 ) {
                     Toggle("", isOn: $store.hotkeyEnabled).settingsToggle()
                 }
-                Row(title: "Shortcut", subtitle: recorder.rejectionHint, isLast: true) {
+                Row(title: "Shortcut", subtitle: recorder.rejectionHint(for: .startMenu), isLast: true) {
                     HStack(spacing: 8) {
                         KeyRecorderField(
                             display: store.hotkeyDisplay,
-                            isRecording: recorder.isRecording,
-                            isEnabled: store.hotkeyEnabled
+                            isRecording: recorder.isRecording(.startMenu),
+                            isEnabled: store.hotkeyEnabled,
+                            help: "Click, then press the shortcut you want for Start"
                         ) {
-                            recorder.toggle()
+                            recorder.toggle(.startMenu)
                         }
                         Button("Reset") { store.resetHotkey() }
                             .controlSize(.small)
@@ -537,18 +599,46 @@ private struct ShortcutsPage: View {
                     }
                 }
             }
-            .onDisappear { recorder.cancel() }
 
-            Card(title: "Window Switcher") {
+            Card(
+                title: "Window Switcher",
+                footer: "Click the shortcut, then press a key while holding ⌘, ⌥ or ⌃ — press ⎋ to cancel. Add ⇧ while switching to go backwards."
+            ) {
                 Row(
-                    title: "Replace ⌘Tab with window switcher",
-                    subtitle: "Every open window as a thumbnail, grouped by app. Needs Accessibility.",
-                    isLast: true
+                    title: "Enable window switcher",
+                    subtitle: "Every open window as a thumbnail, grouped by app. Needs Accessibility."
                 ) {
                     Toggle("", isOn: $store.replaceCommandTab).settingsToggle()
                 }
+                Row(
+                    title: "Shortcut",
+                    subtitle: recorder.rejectionHint(for: .windowSwitcher) ?? switcherShortcutNote,
+                    isLast: true
+                ) {
+                    HStack(spacing: 8) {
+                        KeyRecorderField(
+                            display: store.switcherShortcutDisplay,
+                            isRecording: recorder.isRecording(.windowSwitcher),
+                            isEnabled: store.replaceCommandTab,
+                            help: "Click, then hold a modifier and press the key you want for the window switcher"
+                        ) {
+                            recorder.toggle(.windowSwitcher)
+                        }
+                        Button("Reset") { store.resetSwitcherShortcut() }
+                            .controlSize(.small)
+                            .disabled(!store.replaceCommandTab || store.switcherShortcutIsDefault)
+                            .help("Reset to ⌘Tab")
+                    }
+                }
             }
         }
+        .onDisappear { recorder.cancel() }
+    }
+
+    private var switcherShortcutNote: String {
+        store.switcherShortcutIsDefault
+            ? "Replaces the macOS app switcher."
+            : "The macOS ⌘Tab app switcher keeps working alongside it."
     }
 }
 
@@ -557,6 +647,7 @@ private struct KeyRecorderField: View {
     let display: String
     let isRecording: Bool
     let isEnabled: Bool
+    let help: String
     let action: () -> Void
 
     var body: some View {
@@ -578,7 +669,7 @@ private struct KeyRecorderField: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
-        .help("Click, then press the shortcut you want for Start")
+        .help(help)
     }
 
     private var foreground: Color {

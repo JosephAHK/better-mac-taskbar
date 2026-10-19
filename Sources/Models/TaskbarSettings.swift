@@ -117,6 +117,57 @@ struct StartMenuHotkey: Equatable {
     }
 }
 
+/// Shortcut that opens the window switcher: modifiers held, plus a key pressed.
+///
+/// Releasing the modifiers commits the switch, so at least one of ⌘, ⌥ or ⌃ is
+/// required. ⇧ is never part of it — adding ⇧ always steps backwards.
+struct WindowSwitcherShortcut: Equatable {
+    var keyCode: UInt16
+    var modifierFlags: UInt
+
+    /// ⌘Tab, standing in for the macOS app switcher.
+    static let `default` = WindowSwitcherShortcut(
+        keyCode: 48,
+        modifierFlags: NSEvent.ModifierFlags.command.rawValue
+    )
+
+    static let holdModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+
+    var nsModifierFlags: NSEvent.ModifierFlags {
+        NSEvent.ModifierFlags(rawValue: modifierFlags).intersection(Self.holdModifiers)
+    }
+
+    /// Only ⌘Tab collides with a system shortcut that has to be switched off.
+    var isCommandTab: Bool { self == .default }
+
+    var displayString: String {
+        var parts: [String] = []
+        let mods = nsModifierFlags
+        if mods.contains(.control) { parts.append("⌃") }
+        if mods.contains(.option) { parts.append("⌥") }
+        if mods.contains(.command) { parts.append("⌘") }
+        parts.append(StartMenuHotkey.keyDisplayName(keyCode))
+        return parts.joined()
+    }
+}
+
+/// Colour scheme of the window switcher panel.
+enum WindowSwitcherTheme: String, CaseIterable {
+    case dark
+    case light
+    case system
+
+    static let `default` = WindowSwitcherTheme.dark
+
+    var displayName: String {
+        switch self {
+        case .dark: return "Dark"
+        case .light: return "Light"
+        case .system: return "Match system"
+        }
+    }
+}
+
 /// How a taskbar button is drawn.
 enum TaskbarButtonStyle: String, CaseIterable {
     /// Square, icon-only buttons (the original look).
@@ -170,7 +221,14 @@ final class TaskbarSettings: @unchecked Sendable {
         static let startHotkeyKeyCode = "startHotkeyKeyCode"
         static let startHotkeyModifiers = "startHotkeyModifiers"
         static let startHotkeyModifierOnly = "startHotkeyModifierOnly"
+        /// Historical name: it now turns the window switcher on, whatever its shortcut.
         static let replaceCommandTab = "replaceCommandTab"
+        static let switcherKeyCode = "windowSwitcherKeyCode"
+        static let switcherModifiers = "windowSwitcherModifiers"
+        static let switcherTheme = "windowSwitcherTheme"
+        static let switcherThumbnailHeight = "windowSwitcherThumbnailHeight"
+        static let switcherBackgroundOpacity = "windowSwitcherBackgroundOpacity"
+        static let switcherShowTitles = "windowSwitcherShowTitles"
 
         /// Everything the user chose. Excludes the one-shot prompt flags, which
         /// record what the app already asked rather than a preference.
@@ -179,7 +237,8 @@ final class TaskbarSettings: @unchecked Sendable {
             replaceDock, autoHideTaskbar, autoHideRevealZone,
             autoHideDelay, revealDuration, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
             startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly,
-            replaceCommandTab
+            replaceCommandTab, switcherKeyCode, switcherModifiers, switcherTheme,
+            switcherThumbnailHeight, switcherBackgroundOpacity, switcherShowTitles
         ]
     }
 
@@ -391,13 +450,79 @@ final class TaskbarSettings: @unchecked Sendable {
         }
     }
 
-    /// ⌘Tab opens the window switcher instead of the macOS app switcher.
+    /// The window switcher shortcut is live. With the default ⌘Tab it stands in for
+    /// the macOS app switcher; any other shortcut leaves that one alone.
     var replaceCommandTab: Bool {
         get { defaults.object(forKey: Key.replaceCommandTab) as? Bool ?? true }
         set {
             defaults.set(newValue, forKey: Key.replaceCommandTab)
             NotificationCenter.default.post(name: .windowSwitcherSettingChanged, object: nil)
         }
+    }
+
+    var windowSwitcherShortcut: WindowSwitcherShortcut {
+        get {
+            guard defaults.object(forKey: Key.switcherKeyCode) != nil else { return .default }
+            let shortcut = WindowSwitcherShortcut(
+                keyCode: UInt16(defaults.integer(forKey: Key.switcherKeyCode)),
+                modifierFlags: UInt(defaults.integer(forKey: Key.switcherModifiers))
+            )
+            // Without a held modifier there is nothing to release, so it could never commit.
+            return shortcut.nsModifierFlags.isEmpty ? .default : shortcut
+        }
+        set {
+            defaults.set(Int(newValue.keyCode), forKey: Key.switcherKeyCode)
+            defaults.set(Int(newValue.nsModifierFlags.rawValue), forKey: Key.switcherModifiers)
+            NotificationCenter.default.post(name: .windowSwitcherSettingChanged, object: nil)
+        }
+    }
+
+    // The switcher's look is read each time it opens, so these need no notification.
+
+    var windowSwitcherTheme: WindowSwitcherTheme {
+        get { defaults.string(forKey: Key.switcherTheme).flatMap(WindowSwitcherTheme.init(rawValue:)) ?? .default }
+        set { defaults.set(newValue.rawValue, forKey: Key.switcherTheme) }
+    }
+
+    /// Height of a switcher thumbnail in points before the panel shrinks to fit the screen.
+    static let switcherThumbnailHeightRange: ClosedRange<Double> = 60...220
+    static let switcherThumbnailHeightDefault: Double = 120
+
+    var windowSwitcherThumbnailHeight: Double {
+        get {
+            guard defaults.object(forKey: Key.switcherThumbnailHeight) != nil else {
+                return Self.switcherThumbnailHeightDefault
+            }
+            let raw = defaults.double(forKey: Key.switcherThumbnailHeight)
+            return min(max(raw, Self.switcherThumbnailHeightRange.lowerBound), Self.switcherThumbnailHeightRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.switcherThumbnailHeightRange.lowerBound), Self.switcherThumbnailHeightRange.upperBound)
+            defaults.set(clamped, forKey: Key.switcherThumbnailHeight)
+        }
+    }
+
+    /// Tint laid over the panel's blur: 0 is pure blur, higher is more solid.
+    static let switcherBackgroundOpacityRange: ClosedRange<Double> = 0...0.9
+    static let switcherBackgroundOpacityDefault: Double = 0.35
+
+    var windowSwitcherBackgroundOpacity: Double {
+        get {
+            guard defaults.object(forKey: Key.switcherBackgroundOpacity) != nil else {
+                return Self.switcherBackgroundOpacityDefault
+            }
+            let raw = defaults.double(forKey: Key.switcherBackgroundOpacity)
+            return min(max(raw, Self.switcherBackgroundOpacityRange.lowerBound), Self.switcherBackgroundOpacityRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, Self.switcherBackgroundOpacityRange.lowerBound), Self.switcherBackgroundOpacityRange.upperBound)
+            defaults.set(clamped, forKey: Key.switcherBackgroundOpacity)
+        }
+    }
+
+    var windowSwitcherShowTitles: Bool {
+        get { defaults.object(forKey: Key.switcherShowTitles) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.switcherShowTitles) }
     }
 
     func isPinned(_ bundleID: String) -> Bool {

@@ -139,9 +139,12 @@ final class WindowSwitcherController {
 
     /// Sizes the content for the current groups and centres the panel on `screen`.
     private func layOut(_ panel: WindowSwitcherPanel, on screen: NSScreen) {
+        let style = WindowSwitcherStyle.current
+        panel.appearance = NSAppearance(named: style.isDark ? .darkAqua : .aqua)
         let size = panel.content.configure(
             groups: groups,
             selection: selection,
+            style: style,
             maxSize: NSSize(width: screen.frame.width * 0.9, height: screen.frame.height * 0.9)
         )
         panel.setFrame(NSRect(
@@ -220,12 +223,41 @@ private final class WindowSwitcherPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        appearance = NSAppearance(named: .darkAqua)
         contentView = content
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+/// The user's look for the switcher, read fresh each time it opens.
+private struct WindowSwitcherStyle {
+    var thumbnailHeight: CGFloat
+    var showTitles: Bool
+    var backgroundOpacity: CGFloat
+    var isDark: Bool
+
+    @MainActor
+    static var current: WindowSwitcherStyle {
+        let settings = TaskbarSettings.shared
+        let isDark: Bool
+        switch settings.windowSwitcherTheme {
+        case .dark: isDark = true
+        case .light: isDark = false
+        case .system: isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+        return WindowSwitcherStyle(
+            thumbnailHeight: CGFloat(settings.windowSwitcherThumbnailHeight),
+            showTitles: settings.windowSwitcherShowTitles,
+            backgroundOpacity: CGFloat(settings.windowSwitcherBackgroundOpacity),
+            isDark: isDark
+        )
+    }
+
+    /// Hairlines and highlights: light on the dark theme, dark on the light one.
+    var ink: NSColor { isDark ? .white : .black }
+
+    var selectionFill: NSColor { ink.withAlphaComponent(isDark ? 0.14 : 0.08) }
 }
 
 /// Lays the groups out by hand: one pass of arithmetic per open, no constraints.
@@ -243,7 +275,8 @@ private final class WindowSwitcherView: NSView {
         static let cellPadding: CGFloat = 6
         static let cellSpacing: CGFloat = 4
         static let titleHeight: CGFloat = 16
-        static let thumbnailHeight: CGFloat = 120
+        /// Thumbnail widths at the default 120 pt height; they scale with the setting.
+        static let referenceThumbnailHeight: CGFloat = 120
         static let thumbnailWidthRange: ClosedRange<CGFloat> = 80...220
         static let minimumScale: CGFloat = 0.35
     }
@@ -262,7 +295,6 @@ private final class WindowSwitcherView: NSView {
         layer?.cornerRadius = 12
         layer?.masksToBounds = true
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
 
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
@@ -272,7 +304,6 @@ private final class WindowSwitcherView: NSView {
 
         tint.wantsLayer = true
         tint.autoresizingMask = [.width, .height]
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
         addSubview(tint)
 
         TaskbarAppearance.addObserver(self, selector: #selector(accentChanged))
@@ -286,16 +317,21 @@ private final class WindowSwitcherView: NSView {
 
     /// Builds the views for `groups` and returns the panel size, scaled down
     /// uniformly until it fits `maxSize`.
-    func configure(groups: [[WindowInfo]], selection: Int, maxSize: NSSize) -> NSSize {
+    func configure(groups: [[WindowInfo]], selection: Int, style: WindowSwitcherStyle, maxSize: NSSize) -> NSSize {
         clear()
         self.selection = selection
+        layer?.borderColor = style.ink.withAlphaComponent(0.12).cgColor
+        tint.layer?.backgroundColor = (style.isDark ? NSColor.black : NSColor.white)
+            .withAlphaComponent(style.backgroundOpacity).cgColor
         let aspects = groups.map { $0.map { WindowPreviewView.aspectRatio(of: $0.cgWindowID) ?? 1.6 } }
 
-        var scale: CGFloat = 1
-        var layout = Self.layout(aspects: aspects, scale: scale, maxWidth: maxSize.width)
-        while layout.size.height > maxSize.height, scale > Metrics.minimumScale {
-            scale = max(scale * 0.9, Metrics.minimumScale)
-            layout = Self.layout(aspects: aspects, scale: scale, maxWidth: maxSize.width)
+        // `scale` is relative to the reference size, so the user's size is where it starts.
+        var scale = style.thumbnailHeight / Metrics.referenceThumbnailHeight
+        let minimumScale = Metrics.minimumScale * scale
+        var layout = Self.layout(aspects: aspects, scale: scale, showTitles: style.showTitles, maxWidth: maxSize.width)
+        while layout.size.height > maxSize.height, scale > minimumScale {
+            scale = max(scale * 0.9, minimumScale)
+            layout = Self.layout(aspects: aspects, scale: scale, showTitles: style.showTitles, maxWidth: maxSize.width)
         }
 
         var index = 0
@@ -307,7 +343,8 @@ private final class WindowSwitcherView: NSView {
                 frame: layout.groupFrames[groupIndex],
                 icon: icon,
                 appName: first.appName,
-                windowCount: group.count
+                windowCount: group.count,
+                ink: style.ink
             )
             addSubview(groupView)
             groupViews.append(groupView)
@@ -319,7 +356,9 @@ private final class WindowSwitcherView: NSView {
                     info: info,
                     icon: icon,
                     thumbnailSize: Self.thumbnailSize(forCell: frame.size, scale: scale),
-                    scale: scale
+                    scale: scale,
+                    showTitle: style.showTitles,
+                    selectionFill: style.selectionFill
                 )
                 cell.image = WindowThumbnailCache.shared.image(for: info.cgWindowID)
                 cell.isSelected = index == selection
@@ -376,7 +415,7 @@ private final class WindowSwitcherView: NSView {
     private static func thumbnailSize(forCell size: NSSize, scale: CGFloat) -> NSSize {
         NSSize(
             width: size.width - Metrics.cellPadding * 2,
-            height: (Metrics.thumbnailHeight * scale).rounded()
+            height: (Metrics.referenceThumbnailHeight * scale).rounded()
         )
     }
 
@@ -388,9 +427,9 @@ private final class WindowSwitcherView: NSView {
 
     /// Cells wrap inside a group that is wider than the panel; groups flow left to
     /// right and wrap into rows, top-aligned.
-    private static func layout(aspects: [[CGFloat]], scale: CGFloat, maxWidth: CGFloat) -> Layout {
-        let thumbHeight = (Metrics.thumbnailHeight * scale).rounded()
-        let cellHeight = Metrics.cellPadding * 2 + thumbHeight + 4 + Metrics.titleHeight
+    private static func layout(aspects: [[CGFloat]], scale: CGFloat, showTitles: Bool, maxWidth: CGFloat) -> Layout {
+        let thumbHeight = (Metrics.referenceThumbnailHeight * scale).rounded()
+        let cellHeight = Metrics.cellPadding * 2 + thumbHeight + (showTitles ? 4 + Metrics.titleHeight : 0)
         let innerMax = maxWidth - Metrics.outerPadding * 2
         let groupInnerMax = innerMax - Metrics.groupPadding * 2
 
@@ -457,11 +496,11 @@ private final class WindowSwitcherView: NSView {
 private final class WindowSwitcherGroupView: NSView {
     override var isFlipped: Bool { true }
 
-    init(frame: NSRect, icon: NSImage?, appName: String, windowCount: Int) {
+    init(frame: NSRect, icon: NSImage?, appName: String, windowCount: Int, ink: NSColor) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
+        layer?.backgroundColor = ink.withAlphaComponent(0.05).cgColor
 
         let iconView = NSImageView(frame: NSRect(x: 8, y: 9, width: 16, height: 16))
         iconView.image = icon
@@ -510,14 +549,25 @@ private final class WindowSwitcherCell: NSView {
 
     private let thumbnailView = NSImageView()
     private let placeholderView = NSImageView()
+    private let selectionFill: NSColor
     private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
 
-    init(frame: NSRect, index: Int, info: WindowInfo, icon: NSImage?, thumbnailSize: NSSize, scale: CGFloat) {
+    init(
+        frame: NSRect,
+        index: Int,
+        info: WindowInfo,
+        icon: NSImage?,
+        thumbnailSize: NSSize,
+        scale: CGFloat,
+        showTitle: Bool,
+        selectionFill: NSColor
+    ) {
         self.index = index
         self.info = info
         self.thumbnailSize = thumbnailSize
+        self.selectionFill = selectionFill
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerRadius = 6
@@ -534,18 +584,23 @@ private final class WindowSwitcherCell: NSView {
         placeholderView.imageScaling = .scaleProportionallyUpOrDown
         addSubview(placeholderView)
 
-        let title = NSTextField(labelWithString: info.title.isEmpty ? info.appName : info.title)
-        title.font = .systemFont(ofSize: 11)
-        title.textColor = .labelColor
-        title.lineBreakMode = .byTruncatingTail
-        title.alignment = .center
-        title.frame = NSRect(x: 4, y: area.maxY + 4, width: bounds.width - 8, height: 16)
-        addSubview(title)
+        let titleText = info.title.isEmpty ? info.appName : info.title
+        if showTitle {
+            let title = NSTextField(labelWithString: titleText)
+            title.font = .systemFont(ofSize: 11)
+            title.textColor = .labelColor
+            title.lineBreakMode = .byTruncatingTail
+            title.alignment = .center
+            title.frame = NSRect(x: 4, y: area.maxY + 4, width: bounds.width - 8, height: 16)
+            title.alphaValue = info.isMinimized ? 0.6 : 1
+            addSubview(title)
+        } else {
+            toolTip = titleText
+        }
 
         if info.isMinimized {
             thumbnailView.alphaValue = 0.5
             placeholderView.alphaValue = 0.5
-            title.alphaValue = 0.6
         }
         refreshSelection()
     }
@@ -555,7 +610,7 @@ private final class WindowSwitcherCell: NSView {
     func refreshSelection() {
         layer?.borderWidth = isSelected ? 2 : 0
         layer?.borderColor = resolvedCGColor(.controlAccentColor)
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(isSelected ? 0.14 : 0).cgColor
+        layer?.backgroundColor = isSelected ? selectionFill.cgColor : NSColor.clear.cgColor
     }
 
     override func updateTrackingAreas() {
