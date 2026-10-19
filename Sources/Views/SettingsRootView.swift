@@ -538,6 +538,16 @@ private struct ShortcutsPage: View {
                 }
             }
             .onDisappear { recorder.cancel() }
+
+            Card(title: "Window Switcher") {
+                Row(
+                    title: "Replace ⌘Tab with window switcher",
+                    subtitle: "Every open window as a thumbnail, grouped by app. Needs Accessibility.",
+                    isLast: true
+                ) {
+                    Toggle("", isOn: $store.replaceCommandTab).settingsToggle()
+                }
+            }
         }
     }
 }

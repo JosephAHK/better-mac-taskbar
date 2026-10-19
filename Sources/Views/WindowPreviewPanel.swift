@@ -26,10 +26,6 @@ final class WindowPreviewController {
     private var showTimer: Timer?
     private var hideTimer: Timer?
     private var refreshTimer: Timer?
-    /// Last capture per window, kept after the flyout closes so the next hover shows
-    /// an image at once (refreshed in place) instead of an icon card it pops into.
-    private var thumbnails: [CGWindowID: NSImage] = [:]
-    private var capturesInFlight: Set<CGWindowID> = []
     /// Tracked on its own rather than read off the panel's visibility, so the
     /// keep-visible hold is released exactly once even if AppKit ordered the panel
     /// out behind our back — a leaked hold would switch auto-hide off for good.
@@ -42,6 +38,9 @@ final class WindowPreviewController {
         // look like; it is transient, so closing it is the simplest correct response.
         NotificationCenter.default.addObserver(forName: .taskbarSettingsChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.hide() }
+        }
+        WindowThumbnailCache.shared.addListener { [weak self] windowID, image in
+            self?.thumbnailArrived(image, for: windowID)
         }
     }
 
@@ -129,8 +128,7 @@ final class WindowPreviewController {
         refreshTimer?.invalidate()
         refreshTimer = nil
         anchor = nil
-        let liveIDs = Set(WindowManager.shared.windows.compactMap(\.cgWindowID))
-        thumbnails = thumbnails.filter { liveIDs.contains($0.key) }
+        WindowThumbnailCache.shared.prune(keeping: Set(WindowManager.shared.windows.compactMap(\.cgWindowID)))
         panel?.orderOut(nil)
         if holdsBar {
             holdsBar = false
@@ -218,7 +216,7 @@ final class WindowPreviewController {
             window: info,
             notResponding: button.isNotResponding,
             showsThumbnail: showsThumbnails,
-            thumbnail: info.cgWindowID.flatMap { thumbnails[$0] },
+            thumbnail: WindowThumbnailCache.shared.image(for: info.cgWindowID),
             showsThumbnailHint: !showsThumbnails && WindowThumbnails.isSupported
         )
 
@@ -288,26 +286,10 @@ final class WindowPreviewController {
     }
 
     private func capture(_ info: WindowInfo, scale: CGFloat) {
-        guard #available(macOS 14.0, *), WindowThumbnails.isAvailable,
-              let windowID = info.cgWindowID,
-              capturesInFlight.insert(windowID).inserted else { return }
-        let size = WindowPreviewView.thumbnailSize(for: info)
-        Task {
-            let image = await WindowThumbnailer.shared.image(of: windowID, fitting: size, scale: scale)
-            self.thumbnailArrived(image, for: windowID, scale: scale)
-        }
+        WindowThumbnailCache.shared.capture(info, size: WindowPreviewView.thumbnailSize(for: info), scale: scale)
     }
 
-    private func thumbnailArrived(_ image: CGImage?, for windowID: CGWindowID, scale: CGFloat) {
-        capturesInFlight.remove(windowID)
-        guard let image else { return }
-        let thumbnail = NSImage(
-            cgImage: image,
-            size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
-        )
-        // Cached even when it lands after the flyout moved on or closed: a capture
-        // started during the show delay is meant for the card about to open.
-        thumbnails[windowID] = thumbnail
+    private func thumbnailArrived(_ thumbnail: NSImage, for windowID: CGWindowID) {
         guard isVisible, anchor?.windowInfo.cgWindowID == windowID else { return }
         panel?.preview.setThumbnail(thumbnail, for: windowID)
     }
@@ -367,7 +349,7 @@ final class WindowPreviewView: NSView {
         return NSSize(width: (maxHeight * aspect).rounded(), height: maxHeight)
     }
 
-    private static func aspectRatio(of windowID: CGWindowID?) -> CGFloat? {
+    static func aspectRatio(of windowID: CGWindowID?) -> CGFloat? {
         guard let windowID,
               let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
               let bounds = list.first?[kCGWindowBounds as String] as? [String: CGFloat],

@@ -19,6 +19,7 @@ A Windows 10–style taskbar for macOS. Native Swift / AppKit accessory app (men
 - Trash flyout: Put Back to the original folder, Delete Immediately, Empty Trash
 - Clock, tray, Show Desktop
 - Clock flyout shows Up Next: your next events for the coming week, like the Calendar widget (click one to open it in Calendar)
+- ⌘Tab window switcher: every window as a thumbnail, grouped by app, most recent first (Tab / ⇧Tab / arrows to move, release ⌘ to switch, Esc to cancel; a quick tap flips back to the previous window)
 - Right-click a task button: Close, Minimize, Pin, Hide, New window, Quit
 - Middle-click closes a window
 - Optional Dock replacement (Dock fully hidden while running; restored on quit)
@@ -95,6 +96,7 @@ Menu bar icon → **Settings…**, or Start → Settings:
 - Hide Dock (use taskbar instead)
 - Automatically hide the taskbar, with **Reveal zone** (how close to the edge the pointer must get), **Hide delay**, and **Reveal speed** (0–0.18 s; 0 shows it instantly)
 - Start menu hotkey (uncheck to disable it entirely; click to record; Reset restores ⌘ / Windows key). Keys need ⌘, ⌥ or ⌃ unless they're F1–F20 or a modifier on its own.
+- Replace ⌘Tab with window switcher (on by default; off restores the macOS app switcher)
 - Launch at login (shows when it still needs approval in System Settings → Login Items)
 - Reset to defaults
 

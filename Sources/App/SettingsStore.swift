@@ -140,6 +140,13 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    @Published var replaceCommandTab: Bool {
+        didSet {
+            guard replaceCommandTab != TaskbarSettings.shared.replaceCommandTab else { return }
+            TaskbarSettings.shared.replaceCommandTab = replaceCommandTab
+        }
+    }
+
     @Published private(set) var hotkeyDisplay: String
     @Published private(set) var hiddenApps: [HiddenApp] = []
     @Published private(set) var accessibilityTrusted: Bool
@@ -183,6 +190,7 @@ final class SettingsStore: ObservableObject {
         launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
         hotkeyDisplay = TaskbarSettings.shared.startMenuHotkey.displayString
+        replaceCommandTab = TaskbarSettings.shared.replaceCommandTab
         accessibilityTrusted = AccessibilityService.isTrusted(prompt: false)
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
 
@@ -206,6 +214,7 @@ final class SettingsStore: ObservableObject {
     func refresh() {
         refreshSystemStatus()
         hotkeyEnabled = TaskbarSettings.shared.startHotkeyEnabled
+        replaceCommandTab = TaskbarSettings.shared.replaceCommandTab
         centerIcons = TaskbarSettings.shared.centerIcons
         replaceDock = TaskbarSettings.shared.replaceDock
         autoHideTaskbar = TaskbarSettings.shared.autoHideTaskbar

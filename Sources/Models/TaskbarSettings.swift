@@ -170,6 +170,7 @@ final class TaskbarSettings: @unchecked Sendable {
         static let startHotkeyKeyCode = "startHotkeyKeyCode"
         static let startHotkeyModifiers = "startHotkeyModifiers"
         static let startHotkeyModifierOnly = "startHotkeyModifierOnly"
+        static let replaceCommandTab = "replaceCommandTab"
 
         /// Everything the user chose. Excludes the one-shot prompt flags, which
         /// record what the app already asked rather than a preference.
@@ -177,7 +178,8 @@ final class TaskbarSettings: @unchecked Sendable {
             centerIcons, buttonStyle, showWindowPreviews, windowPreviewDelay, previewThumbnailWidth,
             replaceDock, autoHideTaskbar, autoHideRevealZone,
             autoHideDelay, revealDuration, pinnedBundleIDs, hiddenBundleIDs, taskbarOrder,
-            startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly
+            startHotkeyEnabled, startHotkeyKeyCode, startHotkeyModifiers, startHotkeyModifierOnly,
+            replaceCommandTab
         ]
     }
 
@@ -389,6 +391,15 @@ final class TaskbarSettings: @unchecked Sendable {
         }
     }
 
+    /// ⌘Tab opens the window switcher instead of the macOS app switcher.
+    var replaceCommandTab: Bool {
+        get { defaults.object(forKey: Key.replaceCommandTab) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Key.replaceCommandTab)
+            NotificationCenter.default.post(name: .windowSwitcherSettingChanged, object: nil)
+        }
+    }
+
     func isPinned(_ bundleID: String) -> Bool {
         pinnedBundleIDs.contains(bundleID)
     }
@@ -436,7 +447,7 @@ extension TaskbarSettings {
         // Removing keys bypasses the setters, so announce every change they would have.
         for name: Notification.Name in [
             .taskbarSettingsChanged, .pinnedAppsChanged, .hiddenAppsChanged,
-            .taskbarOrderChanged, .startMenuHotkeyChanged
+            .taskbarOrderChanged, .startMenuHotkeyChanged, .windowSwitcherSettingChanged
         ] {
             NotificationCenter.default.post(name: name, object: nil)
         }
@@ -451,4 +462,5 @@ extension Notification.Name {
     static let windowsUpdated = Notification.Name("windowsUpdated")
     static let launchingAppsChanged = Notification.Name("launchingAppsChanged")
     static let startMenuHotkeyChanged = Notification.Name("startMenuHotkeyChanged")
+    static let windowSwitcherSettingChanged = Notification.Name("windowSwitcherSettingChanged")
 }

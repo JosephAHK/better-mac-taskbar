@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WindowManager.shared.start()
         TaskbarPanelController.shared.show()
         StartHotkeyMonitor.shared.start()
+        // With the setting off this re-enables the native ⌘Tab, in case a crash
+        // left it disabled.
+        WindowSwitcherHotkey.shared.start()
 
         ensureAccessibility()
 
@@ -51,6 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.info("applicationWillTerminate")
         StartHotkeyMonitor.shared.stop()
+        // Puts the native ⌘Tab back.
+        WindowSwitcherHotkey.shared.stop()
         WindowManager.shared.stop()
         TaskbarPanelController.shared.hide()
         // Unconditional: it is a no-op unless we hid the Dock, and it also drains

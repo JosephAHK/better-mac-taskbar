@@ -38,6 +38,9 @@ final class WindowManager {
     /// Last taskbar icon the user clicked — optimistic underline until the OS
     /// reports a different front window (manual click / Cmd-` / etc.).
     private(set) var lastActivatedWindowID: String?
+    /// Window ids, most recently active first — the ⌘Tab switcher's order. Only
+    /// windows seen active since launch are listed.
+    private(set) var recentWindowIDs: [String] = []
     private var lastActivatedAt: Date?
     /// Brief window where taskbar click wins over still-stale front-window probes.
     private let activationGrace: TimeInterval = 1.2
@@ -70,6 +73,7 @@ final class WindowManager {
     func noteActivated(id: String) {
         lastActivatedWindowID = id
         lastActivatedAt = Date()
+        noteRecent(id)
         // Optimistic underline update — don't wait for AppleScript/refresh.
         let updated = windows.map { $0.with(isActive: $0.id == id) }
         if updated != windows {
@@ -749,12 +753,23 @@ final class WindowManager {
         if windowsChanged {
             windows = next
             WindowDiagnostics.noteWindowSet(next)
+            let liveIDs = Set(next.map(\.id))
+            recentWindowIDs.removeAll { !liveIDs.contains($0) }
+        }
+        if let activeID = next.first(where: \.isActive)?.id {
+            noteRecent(activeID)
         }
         // The bar dims hung apps' buttons, so a hang starting or ending is a change
         // it has to hear about even when no window did.
         if windowsChanged || unresponsivePIDs != wasUnresponsive {
             NotificationCenter.default.post(name: .windowsUpdated, object: nil)
         }
+    }
+
+    private func noteRecent(_ id: String) {
+        guard recentWindowIDs.first != id else { return }
+        recentWindowIDs.removeAll { $0 == id }
+        recentWindowIDs.insert(id, at: 0)
     }
 
     /// After a taskbar click, keep that icon's blue underline stable even when
