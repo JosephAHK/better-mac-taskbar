@@ -4,22 +4,22 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Better Mac Taskbar</string>
 	<key>CFBundleExecutable</key>
 	<string>BetterMacTaskbar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.bettermac.taskbar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Better Mac Taskbar</string>
-	<key>CFBundleDisplayName</key>
-	<string>Better Mac Taskbar</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSApplicationCategoryType</key>
@@ -28,17 +28,17 @@
 	<string>13.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026. Released under the MIT License.</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<key>NSCalendarsUsageDescription</key>
-	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Better Mac Taskbar needs to control apps so clicking a taskbar icon can bring that specific window to the front.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Better Mac Taskbar shows your upcoming events in the clock's calendar.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026. Released under the MIT License.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>
